@@ -1,0 +1,20 @@
+[package]
+name = "blindwire-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blindwire-core = { path = "../blindwire-core" }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+crossterm = "0.27"
+base64 = "0.21"
+url = "2.5"
+rand = "0.8"
+
+[profile.release]
+panic = "abort"
+lto = true
+strip = true
+codegen-units = 1

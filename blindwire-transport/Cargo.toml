@@ -1,0 +1,41 @@
+[package]
+name = "blindwire-transport"
+version = "0.1.0"
+edition = "2021"
+description = "High-level async transport for BlindWire secure messaging"
+license = "MIT"
+
+[dependencies]
+# Core protocol implementation
+blindwire-core = { path = "../blindwire-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# Stream utilities
+futures-util = "0.3"
+
+# Explicit memory zeroization
+zeroize = { version = "1.7", features = ["derive"] }
+
+# TLS (for wss://)
+native-tls = "0.2"
+
+[dev-dependencies]
+# For integration tests
+tokio = { version = "1", features = ["full"] }
+blindwire-server = { path = "../blindwire-server" }
+
+[features]
+default = []
+
+[profile.release]
+# Panic = abort reduces binary size and prevents unwinding exploits
+panic = "abort"
+# LTO for smaller binary and cross-crate optimization
+lto = true
+# Strip symbols in release
+strip = true

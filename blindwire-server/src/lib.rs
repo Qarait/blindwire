@@ -12,7 +12,7 @@ use sha2::{Sha256, Digest};
 use tokio::net::TcpListener;
 
 // Constants from spec
-const SESSION_TTL: Duration = Duration::from_secs(600); // 10 mins
+const SESSION_TTL: Duration = Duration::from_secs(3600); // 1 hour
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 const MAX_QUEUE_DEPTH: usize = 32;
 const MAX_CONN_PER_IP: usize = 5;

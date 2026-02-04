@@ -17,11 +17,11 @@ use crate::noise::{NoiseSession, Role};
 /// Handshake timeout: 30 seconds.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Idle timeout: 5 minutes between messages.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Idle timeout: 10 minutes between messages.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Session TTL: 10 minutes maximum lifetime.
-pub const SESSION_TTL: Duration = Duration::from_secs(600);
+/// Session TTL: 1 hour maximum lifetime.
+pub const SESSION_TTL: Duration = Duration::from_secs(3600);
 
 /// Reconnection grace window: 5 seconds.
 pub const RECONNECT_GRACE: Duration = Duration::from_secs(5);

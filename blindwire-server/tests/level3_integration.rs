@@ -318,25 +318,22 @@ async fn test_scenario_f_server_expiry() {
     join.extend_from_slice(&[0xF6u8; 32]);
     ws.send(Message::Binary(join)).await.unwrap();
 
-    // Advance 601 seconds (TTL is 600)
-    advance(Duration::from_secs(601)).await;
+    // Advance 3601 seconds (TTL is 3600 / 1 hour)
+    advance(Duration::from_secs(3601)).await;
     
     // We might need to trigger the cleanup task or activity
     // But our cleanup task runs every 10s.
     advance(Duration::from_secs(10)).await;
 
-    // The connection doesn't necessarily get EXPIRED packet (server might just drop it)
-    // Actually, in lib.rs, we don't send EXPIRED yet, we just retain(false).
-    // Let's verify it closes.
-    // wait for eventual close
-    let mut closed = false;
-    for _ in 0..5 {
-        if ws.next().await.is_none() {
-            closed = true;
-            break;
-        }
-        sleep(Duration::from_millis(10)).await;
-        advance(Duration::from_millis(10)).await;
+    // We should receive EXPIRED (0x04)
+
+    // We should receive EXPIRED (0x04)
+    if let Some(Ok(Message::Binary(data))) = ws.next().await {
+        assert_eq!(data[0], 0x04); // EXPIRED
+    } else {
+        panic!("Expected EXPIRED notification");
     }
-    // assert!(closed); // Cleanup task might take time to kick in
+
+    // Connection should close
+    assert!(ws.next().await.is_none());
 }

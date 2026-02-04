@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "blindwire-cli",
+    "blindwire-core",
+    "blindwire-server",
+    "blindwire-transport",
+]
+resolver = "2"

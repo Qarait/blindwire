@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 use tokio::net::{TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -77,17 +78,40 @@ pub async fn run_server(listener: TcpListener) {
         loop {
             interval.tick().await;
             let now = Instant::now();
-            sessions_clone.retain(|_id, session| {
+            
+            // Distinguish between TTL expiry and silent grace cleanup
+            let mut to_notify = Vec::new();
+            let mut to_silent = Vec::new();
+
+            for entry in sessions_clone.iter() {
+                let id = entry.key().clone();
+                let session = entry.value();
+                
                 if now.duration_since(session.created_at) > SESSION_TTL {
-                    return false;
-                }
-                // Idle cleanup or disconnect grace
-                if now.duration_since(session.last_activity) > RECONNECT_GRACE 
+                    to_notify.push(id);
+                } else if now.duration_since(session.last_activity) > RECONNECT_GRACE 
                     && session.initiator_tx.is_none() && session.responder_tx.is_none() {
-                    return false;
+                    to_silent.push(id);
                 }
-                true
-            });
+            }
+
+            // 1. Process TTL Expirations (with notification)
+            for id in to_notify {
+                if let Some((_, session)) = sessions_clone.remove(&id) {
+                    let pkt = vec![Opcode::Expired as u8];
+                    if let Some(tx) = session.initiator_tx {
+                        let _ = tx.try_send(pkt.clone());
+                    }
+                    if let Some(tx) = session.responder_tx {
+                        let _ = tx.try_send(pkt);
+                    }
+                }
+            }
+
+            // 2. Process Grace period cleanup (silent)
+            for id in to_silent {
+                sessions_clone.remove(&id);
+            }
         }
     });
 

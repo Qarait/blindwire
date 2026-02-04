@@ -26,6 +26,15 @@ The following risks are explicitly out of scope:
 - **Metadata Protection**: While the relay is binary-only, standard metadata (IP addresses, timing, packet sizes) remains visible to the network and relay.
 - **Persistence Resistance**: Zeroization handles RAM, but cannot protect against persistent OS-level forensic hooks or "cold boot" attacks on memory.
 
+## Project Layout
+
+| Component | Role | Description |
+|-----------|------|-------------|
+| `blindwire-cli` | Client | TUI-based messaging client. |
+| `blindwire-server` | Relay | Binary signaling server (Relay). |
+| `blindwire-core` | Protocol | Core state machine and framing logic. |
+| `blindwire-transport` | Transport | Async secure transport wrapper. |
+
 ## Usage
 
 ### 1. Build

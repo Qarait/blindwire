@@ -14,8 +14,9 @@ use rand::RngCore;
 
 use blindwire_core::state::{Session, SessionState, SessionReceiveResult};
 use blindwire_core::frame::{Frame, LENGTH_PREFIX_SIZE};
+use blindwire_core::ProtocolError;
 
-const DEFAULT_SERVER: &str = "wss://127.0.0.1:8080";
+const DEFAULT_SERVER: &str = "ws://127.0.0.1:8080";
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -92,9 +93,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Transport safety check
-    if server_url.starts_with("ws://") && !insecure {
-        eprintln!("ERROR: ws:// is only allowed with --insecure-dev on localhost.");
-        return Ok(());
+    let is_local = server_url.contains("127.0.0.1") || server_url.contains("localhost");
+    
+    if server_url.starts_with("ws://") {
+        if !is_local {
+            eprintln!("ERROR: ws:// is FORBIDDEN for non-local hosts. wss:// is mandatory.");
+            return Ok(());
+        }
+        if !insecure {
+            eprintln!("ERROR: ws:// requires --insecure-dev flag.");
+            return Ok(());
+        }
+        println!("NOTICE: Local development mode: TLS disabled.");
     }
 
     let config = Config {
@@ -200,37 +210,42 @@ impl App {
             
             tokio::select! {
                 Some(event) = event_rx.recv() => {
-                    self.handle_event(event, &net_tx).await?;
+                    if let Err(e) = self.handle_event(event, &net_tx).await {
+                        self.status = format!("ERROR: {:?}", e);
+                        return Err(e);
+                    }
                 }
-                Ok(true) = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(10))) => {
-                    if let Event::Key(key) = event::read()? {
-                        match key.code {
-                            KeyCode::Enter => {
-                                if !self.input.is_empty() {
-                                    let text = std::mem::take(&mut self.input);
-                                    if self.session.state() == SessionState::Active {
-                                        match self.session.send_message(&text) {
-                                            Ok(frame) => {
-                                                let mut data = vec![Opcode::Relay as u8];
-                                                data.extend(frame.to_wire());
-                                                let _ = net_tx.send(data).await;
-                                                self.log.push(format!("You: {}", text));
+                res = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(10))) => {
+                    if let Ok(Ok(true)) = res {
+                        if let Event::Key(key) = event::read()? {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    if !self.input.is_empty() {
+                                        let text = std::mem::take(&mut self.input);
+                                        if self.session.state() == SessionState::Active {
+                                            match self.session.send_message(&text) {
+                                                Ok(frame) => {
+                                                    let mut data = vec![Opcode::Relay as u8];
+                                                    data.extend(frame.to_wire());
+                                                    let _ = net_tx.send(data).await;
+                                                    self.log.push(format!("You: {}", text));
+                                                }
+                                                Err(e) => self.log.push(format!("Error: {:?}", e)),
                                             }
-                                            Err(e) => self.log.push(format!("Error: {:?}", e)),
+                                        } else {
+                                            self.log.push("Cannot send: Session not active".to_string());
                                         }
-                                    } else {
-                                        self.log.push("Cannot send: Session not active".to_string());
                                     }
                                 }
+                                KeyCode::Char(c) => self.input.push(c),
+                                KeyCode::Backspace => { self.input.pop(); }
+                                KeyCode::Esc => {
+                                    let _ = net_tx.send(vec![Opcode::PeerQuit as u8]).await; // Explicit QUIT
+                                    self.session.terminate();
+                                    return Ok(());
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => self.input.push(c),
-                            KeyCode::Backspace => { self.input.pop(); }
-                            KeyCode::Esc => {
-                                let _ = net_tx.send(vec![Opcode::PeerQuit as u8]).await; // Explicit QUIT
-                                self.session.terminate();
-                                return Ok(());
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -298,35 +313,36 @@ impl App {
                                         }
                                         SessionReceiveResult::Terminated => {
                                             self.log.push("Session terminated by peer.".to_string());
-                                            return Ok(());
+                                            self.session.terminate();
+                                            return Err(Box::new(ProtocolError::SessionTerminated));
                                         }
                                         _ => {}
                                     },
-                                        Err(e) => {
-                                            self.log.push(format!("Protocol Error: {:?}", e));
-                                            self.session.terminate();
-                                            return Err(e.into());
-                                        }
+                                    Err(e) => {
+                                        self.log.push(format!("Protocol Error: {:?}", e));
+                                        self.session.terminate();
+                                        return Err(e.into());
                                     }
                                 }
-                                Err(e) => {
-                                    self.log.push(format!("Framing Error: {:?}", e));
-                                    self.session.terminate();
-                                    return Err(e.into());
-                                }
+                            }
+                            Err(e) => {
+                                self.log.push(format!("Framing Error: {:?}", e));
+                                self.session.terminate();
+                                return Err(e.into());
                             }
                         }
-                        0x02 => self.log.push("Peer joined.".to_string()),
-                        0x03 => {
-                            self.log.push("Peer quit.".to_string());
-                            self.session.terminate();
-                            return Err(blindwire_core::error::ProtocolError::SessionTerminated.into());
-                        }
-                        0x04 => {
-                            self.log.push("Session expired (TTL reached).".to_string());
-                            self.session.terminate();
-                            return Err(blindwire_core::error::ProtocolError::SessionTerminated.into());
-                        }
+                    }
+                    0x02 => self.log.push("Peer joined.".to_string()),
+                    0x03 => {
+                        self.log.push("Peer quit.".to_string());
+                        self.session.terminate();
+                        return Err(Box::new(ProtocolError::SessionTerminated));
+                    }
+                    0x04 => {
+                        self.log.push("Session expired (TTL reached).".to_string());
+                        self.session.terminate();
+                        return Err(Box::new(ProtocolError::SessionTerminated));
+                    }
                     0x05 => { // Error
                         let code = if data.len() > 1 { data[1] } else { 0 };
                         let msg = match code {

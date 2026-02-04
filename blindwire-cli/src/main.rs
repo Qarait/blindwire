@@ -226,7 +226,8 @@ impl App {
                             KeyCode::Char(c) => self.input.push(c),
                             KeyCode::Backspace => { self.input.pop(); }
                             KeyCode::Esc => {
-                                let _ = net_tx.send(vec![0x02]).await; // TERMINATE
+                                let _ = net_tx.send(vec![Opcode::PeerQuit as u8]).await; // Explicit QUIT
+                                self.session.terminate();
                                 return Ok(());
                             }
                             _ => {}
@@ -301,20 +302,31 @@ impl App {
                                         }
                                         _ => {}
                                     },
-                                    Err(e) => {
-                                        self.log.push(format!("Protocol Error: {:?}", e));
-                                        return Ok(());
+                                        Err(e) => {
+                                            self.log.push(format!("Protocol Error: {:?}", e));
+                                            self.session.terminate();
+                                            return Err(e.into());
+                                        }
                                     }
                                 }
+                                Err(e) => {
+                                    self.log.push(format!("Framing Error: {:?}", e));
+                                    self.session.terminate();
+                                    return Err(e.into());
+                                }
                             }
-                            Err(e) => self.log.push(format!("Framing Error: {:?}", e)),
                         }
-                    }
-                    0x02 => self.log.push("Peer joined.".to_string()),
-                    0x03 => {
-                        self.log.push("Peer quit.".to_string());
-                        self.session.on_disconnected();
-                    }
+                        0x02 => self.log.push("Peer joined.".to_string()),
+                        0x03 => {
+                            self.log.push("Peer quit.".to_string());
+                            self.session.terminate();
+                            return Err(blindwire_core::error::ProtocolError::SessionTerminated.into());
+                        }
+                        0x04 => {
+                            self.log.push("Session expired (TTL reached).".to_string());
+                            self.session.terminate();
+                            return Err(blindwire_core::error::ProtocolError::SessionTerminated.into());
+                        }
                     0x05 => { // Error
                         let code = if data.len() > 1 { data[1] } else { 0 };
                         let msg = match code {

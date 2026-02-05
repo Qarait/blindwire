@@ -45,15 +45,21 @@ impl SessionKeypair {
     ///
     /// Uses snow's internal CSPRNG (OS-provided randomness).
     pub fn generate() -> Result<Self, ProtocolError> {
-        let builder = Builder::new(NOISE_PATTERN.parse().map_err(|_| ProtocolError::InternalError)?);
-        let keypair = builder.generate_keypair().map_err(|_| ProtocolError::InternalError)?;
-        
+        let builder = Builder::new(
+            NOISE_PATTERN
+                .parse()
+                .map_err(|_| ProtocolError::InternalError)?,
+        );
+        let keypair = builder
+            .generate_keypair()
+            .map_err(|_| ProtocolError::InternalError)?;
+
         let mut secret = [0u8; 32];
         let mut public = [0u8; 32];
-        
+
         secret.copy_from_slice(&keypair.private);
         public.copy_from_slice(&keypair.public);
-        
+
         Ok(Self { secret, public })
     }
 
@@ -88,11 +94,15 @@ impl NoiseSession {
     /// Create a new Noise session as initiator.
     pub fn new_initiator() -> Result<Self, ProtocolError> {
         let keypair = SessionKeypair::generate()?;
-        
-        let builder = Builder::new(NOISE_PATTERN.parse().map_err(|_| ProtocolError::InternalError)?)
-            .local_private_key(&keypair.secret)
-            .build_initiator()
-            .map_err(|_| ProtocolError::InternalError)?;
+
+        let builder = Builder::new(
+            NOISE_PATTERN
+                .parse()
+                .map_err(|_| ProtocolError::InternalError)?,
+        )
+        .local_private_key(&keypair.secret)
+        .build_initiator()
+        .map_err(|_| ProtocolError::InternalError)?;
 
         Ok(Self {
             state: NoiseState::Handshake(Box::new(builder)),
@@ -105,11 +115,15 @@ impl NoiseSession {
     /// Create a new Noise session as responder.
     pub fn new_responder() -> Result<Self, ProtocolError> {
         let keypair = SessionKeypair::generate()?;
-        
-        let builder = Builder::new(NOISE_PATTERN.parse().map_err(|_| ProtocolError::InternalError)?)
-            .local_private_key(&keypair.secret)
-            .build_responder()
-            .map_err(|_| ProtocolError::InternalError)?;
+
+        let builder = Builder::new(
+            NOISE_PATTERN
+                .parse()
+                .map_err(|_| ProtocolError::InternalError)?,
+        )
+        .local_private_key(&keypair.secret)
+        .build_responder()
+        .map_err(|_| ProtocolError::InternalError)?;
 
         Ok(Self {
             state: NoiseState::Handshake(Box::new(builder)),
@@ -172,7 +186,9 @@ impl NoiseSession {
         }
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_SIZE];
-        let len = hs.write_message(&[], &mut buf).map_err(|_| ProtocolError::HandshakeFailed)?;
+        let len = hs
+            .write_message(&[], &mut buf)
+            .map_err(|_| ProtocolError::HandshakeFailed)?;
         buf.truncate(len);
 
         // Check if handshake is complete after this message
@@ -198,7 +214,9 @@ impl NoiseSession {
         }
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_SIZE];
-        let _len = hs.read_message(message, &mut buf).map_err(|_| ProtocolError::HandshakeFailed)?;
+        let _len = hs
+            .read_message(message, &mut buf)
+            .map_err(|_| ProtocolError::HandshakeFailed)?;
 
         // Check if handshake is complete after this message
         self.maybe_transition_to_transport()?;
@@ -234,7 +252,9 @@ impl NoiseSession {
         }
 
         // Convert to transport state
-        let transport = hs.into_transport_mode().map_err(|_| ProtocolError::HandshakeFailed)?;
+        let transport = hs
+            .into_transport_mode()
+            .map_err(|_| ProtocolError::HandshakeFailed)?;
         self.state = NoiseState::Transport(Box::new(transport));
 
         Ok(())
@@ -254,7 +274,9 @@ impl NoiseSession {
 
         // Noise adds 16 bytes for the authentication tag
         let mut buf = vec![0u8; plaintext.len() + 16];
-        let len = transport.write_message(plaintext, &mut buf).map_err(|_| ProtocolError::DecryptionFailed)?;
+        let len = transport
+            .write_message(plaintext, &mut buf)
+            .map_err(|_| ProtocolError::DecryptionFailed)?;
         buf.truncate(len);
 
         Ok(buf)
@@ -278,7 +300,9 @@ impl NoiseSession {
         }
 
         let mut buf = vec![0u8; ciphertext.len()];
-        let len = transport.read_message(ciphertext, &mut buf).map_err(|_| ProtocolError::DecryptionFailed)?;
+        let len = transport
+            .read_message(ciphertext, &mut buf)
+            .map_err(|_| ProtocolError::DecryptionFailed)?;
         buf.truncate(len);
 
         Ok(buf)
@@ -290,7 +314,7 @@ impl NoiseSession {
     pub fn terminate(&mut self) {
         // Replace state with Terminated, dropping old state
         self.state = NoiseState::Terminated;
-        
+
         // keypair will be zeroized when self is dropped (ZeroizeOnDrop)
         // peer_public is just a public key, but we clear it anyway
         if let Some(ref mut key) = self.peer_public {
@@ -305,9 +329,9 @@ impl NoiseSession {
     /// Only available after handshake completes.
     pub fn fingerprint(&self) -> Option<String> {
         use sha2::{Digest, Sha256};
-        
+
         let peer_pub = self.peer_public.as_ref()?;
-        
+
         let mut hasher = Sha256::new();
         if self.role == Role::Initiator {
             hasher.update(&self.keypair.public);
@@ -317,7 +341,7 @@ impl NoiseSession {
             hasher.update(&self.keypair.public);
         }
         let result = hasher.finalize();
-        
+
         Some(hex::encode(&result[..8])) // 16 hex chars
     }
 }
@@ -339,7 +363,7 @@ mod tests {
     fn test_keypair_generation() {
         let kp1 = SessionKeypair::generate().unwrap();
         let kp2 = SessionKeypair::generate().unwrap();
-        
+
         // Each keypair should be unique
         assert_ne!(kp1.public, kp2.public);
     }
@@ -444,9 +468,12 @@ mod tests {
     fn test_terminate_prevents_use() {
         let mut session = NoiseSession::new_initiator().unwrap();
         session.terminate();
-        
+
         assert!(session.is_terminated());
         assert_eq!(session.is_my_turn(), Err(ProtocolError::SessionTerminated));
-        assert_eq!(session.write_handshake(), Err(ProtocolError::SessionTerminated));
+        assert_eq!(
+            session.write_handshake(),
+            Err(ProtocolError::SessionTerminated)
+        );
     }
 }

@@ -2,8 +2,8 @@
 
 use blindwire_server::run_server;
 use blindwire_transport::{SecureSession, TransportConfig};
-use tokio::net::TcpListener;
 use std::time::Duration;
+use tokio::net::TcpListener;
 
 /// Full end-to-end test: connect, handshake, exchange messages.
 #[tokio::test]
@@ -75,7 +75,7 @@ async fn test_full_session_e2e() {
 
     // 5. Bidirectional message exchange
     println!("Testing bidirectional exchange...");
-    
+
     let (i_send, r_recv) = tokio::join!(
         initiator.send_text("Hello from initiator!"),
         responder.recv()
@@ -85,10 +85,7 @@ async fn test_full_session_e2e() {
     assert_eq!(msg.as_str().expect("utf8"), "Hello from initiator!");
     println!("Responder received: {}", msg.as_str().unwrap());
 
-    let (r_send, i_recv) = tokio::join!(
-        responder.send_text("Hello back!"),
-        initiator.recv()
-    );
+    let (r_send, i_recv) = tokio::join!(responder.send_text("Hello back!"), initiator.recv());
     r_send.expect("responder send failed");
     let msg = i_recv.expect("initiator recv failed");
     assert_eq!(msg.as_str().expect("utf8"), "Hello back!");

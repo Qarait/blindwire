@@ -29,8 +29,8 @@
 pub mod config;
 pub mod error;
 pub mod message;
-pub mod session;
 mod relay;
+pub mod session;
 
 pub use config::{Role, TransportConfig};
 pub use error::TransportError;

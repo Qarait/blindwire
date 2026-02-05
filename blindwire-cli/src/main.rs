@@ -1,19 +1,20 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+};
+use futures_util::{SinkExt, StreamExt};
+use rand::RngCore;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
-use futures_util::{StreamExt, SinkExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use crossterm::{
-    event::{self, Event, KeyCode},
-    terminal::{enable_raw_mode, disable_raw_mode, Clear, ClearType},
-    execute, cursor,
-};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
 
-use blindwire_core::state::{Session, SessionState, SessionReceiveResult};
 use blindwire_core::frame::{Frame, LENGTH_PREFIX_SIZE};
+use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
 use blindwire_core::ProtocolError;
 
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:8080";
@@ -56,7 +57,7 @@ struct App {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    
+
     let mut insecure = false;
     let mut server_url = DEFAULT_SERVER.to_string();
     let mut session_id = String::new();
@@ -68,11 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match args[i].as_str() {
             "--insecure-dev" => insecure = true,
             "--server" if i + 1 < args.len() => {
-                server_url = args[i+1].clone();
+                server_url = args[i + 1].clone();
                 i += 1;
             }
             "--session" if i + 1 < args.len() => {
-                session_id = args[i+1].clone();
+                session_id = args[i + 1].clone();
                 role = 'r'; // Providing a session implies joining as responder
                 i += 1;
             }
@@ -94,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Transport safety check
     let is_local = server_url.contains("127.0.0.1") || server_url.contains("localhost");
-    
+
     if server_url.starts_with("ws://") {
         if !is_local {
             eprintln!("ERROR: ws:// is FORBIDDEN for non-local hosts. wss:// is mandatory.");
@@ -147,7 +148,7 @@ impl App {
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(32);
         let (net_tx, mut net_rx) = mpsc::channel::<Vec<u8>>(32);
-        
+
         let server_url = self.config.server_url.clone();
         let session_id = self.config.session_id.clone();
         let role = self.config.role;
@@ -157,11 +158,13 @@ impl App {
             loop {
                 if let Ok((ws_stream, _)) = connect_async(&server_url).await {
                     let (mut ws_tx, mut ws_rx) = ws_stream.split();
-                    
+
                     // Send JOIN
                     let role_byte = if role == 'i' { 0x69u8 } else { 0x72u8 };
                     let mut join_packet = vec![Opcode::Join as u8, role_byte];
-                    let decoded_id = URL_SAFE_NO_PAD.decode(&session_id).unwrap_or_else(|_| vec![0u8; 16]);
+                    let decoded_id = URL_SAFE_NO_PAD
+                        .decode(&session_id)
+                        .unwrap_or_else(|_| vec![0u8; 16]);
                     // Pad to 32 bytes if needed (v1.1 spec says 32B ID)
                     let mut id_32 = [0u8; 32];
                     if decoded_id.len() >= 32 {
@@ -170,7 +173,7 @@ impl App {
                         id_32[..decoded_id.len()].copy_from_slice(&decoded_id);
                     }
                     join_packet.extend_from_slice(&id_32);
-                    
+
                     if ws_tx.send(Message::Binary(join_packet)).await.is_ok() {
                         let _ = event_tx.send(AppEvent::Connected).await;
 
@@ -197,7 +200,8 @@ impl App {
         });
 
         self.log.push(format!("Server: {}", self.config.server_url));
-        self.log.push(format!("Session: {}", self.config.session_id));
+        self.log
+            .push(format!("Session: {}", self.config.session_id));
         if self.config.role == 'i' {
             self.log.push("Awaiting peer...".to_string());
         }
@@ -207,7 +211,7 @@ impl App {
                 self.draw()?;
                 self.last_draw = Instant::now();
             }
-            
+
             tokio::select! {
                 Some(event) = event_rx.recv() => {
                     if let Err(e) = self.handle_event(event, &net_tx).await {
@@ -259,7 +263,11 @@ impl App {
         }
     }
 
-    async fn handle_event(&mut self, event: AppEvent, net_tx: &mpsc::Sender<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_event(
+        &mut self,
+        event: AppEvent,
+        net_tx: &mpsc::Sender<Vec<u8>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match event {
             AppEvent::Connected => {
                 self.session.on_connected()?;
@@ -277,54 +285,63 @@ impl App {
                 self.status = "DISCONNECTED (Reconnecting...)".to_string();
             }
             AppEvent::MessageReceived(data) => {
-                if data.is_empty() { return Ok(()); }
+                if data.is_empty() {
+                    return Ok(());
+                }
                 let opcode = data[0];
-                
+
                 match opcode {
-                    0x01 => { // Relay (Peer -> Server -> Me)
-                        if data.len() < 1 + LENGTH_PREFIX_SIZE { return Ok(()); }
+                    0x01 => {
+                        // Relay (Peer -> Server -> Me)
+                        if data.len() < 1 + LENGTH_PREFIX_SIZE {
+                            return Ok(());
+                        }
                         let body = &data[1..];
                         match Frame::parse(body) {
-                            Ok(frame) => {
-                                match self.session.on_receive(frame) {
-                                    Ok(res) => match res {
-                                        SessionReceiveResult::Message(text) => {
-                                            self.log.push(format!("Peer: {}", text));
-                                        }
-                                        SessionReceiveResult::HandshakeResponse(f) => {
-                                            let mut data = vec![Opcode::Relay as u8];
-                                            data.extend(f.to_wire());
-                                            net_tx.send(data).await?;
-                                        }
-                                        SessionReceiveResult::HandshakeCompleteWithResponse(f) => {
-                                            self.log.push("Handshake complete. Secure session active.".to_string());
-                                            if let Some(fp) = self.session.fingerprint() {
-                                                self.log.push(format!("Fingerprint: {}", fp));
-                                            }
-                                            let mut data = vec![Opcode::Relay as u8];
-                                            data.extend(f.to_wire());
-                                            net_tx.send(data).await?;
-                                        }
-                                        SessionReceiveResult::HandshakeComplete => {
-                                            self.log.push("Handshake complete. Secure session active.".to_string());
-                                            if let Some(fp) = self.session.fingerprint() {
-                                                self.log.push(format!("Fingerprint: {}", fp));
-                                            }
-                                        }
-                                        SessionReceiveResult::Terminated => {
-                                            self.log.push("Session terminated by peer.".to_string());
-                                            self.session.terminate();
-                                            return Err(Box::new(ProtocolError::SessionTerminated));
-                                        }
-                                        _ => {}
-                                    },
-                                    Err(e) => {
-                                        self.log.push(format!("Protocol Error: {:?}", e));
-                                        self.session.terminate();
-                                        return Err(e.into());
+                            Ok(frame) => match self.session.on_receive(frame) {
+                                Ok(res) => match res {
+                                    SessionReceiveResult::Message(text) => {
+                                        self.log.push(format!("Peer: {}", text));
                                     }
+                                    SessionReceiveResult::HandshakeResponse(f) => {
+                                        let mut data = vec![Opcode::Relay as u8];
+                                        data.extend(f.to_wire());
+                                        net_tx.send(data).await?;
+                                    }
+                                    SessionReceiveResult::HandshakeCompleteWithResponse(f) => {
+                                        self.log.push(
+                                            "Handshake complete. Secure session active."
+                                                .to_string(),
+                                        );
+                                        if let Some(fp) = self.session.fingerprint() {
+                                            self.log.push(format!("Fingerprint: {}", fp));
+                                        }
+                                        let mut data = vec![Opcode::Relay as u8];
+                                        data.extend(f.to_wire());
+                                        net_tx.send(data).await?;
+                                    }
+                                    SessionReceiveResult::HandshakeComplete => {
+                                        self.log.push(
+                                            "Handshake complete. Secure session active."
+                                                .to_string(),
+                                        );
+                                        if let Some(fp) = self.session.fingerprint() {
+                                            self.log.push(format!("Fingerprint: {}", fp));
+                                        }
+                                    }
+                                    SessionReceiveResult::Terminated => {
+                                        self.log.push("Session terminated by peer.".to_string());
+                                        self.session.terminate();
+                                        return Err(Box::new(ProtocolError::SessionTerminated));
+                                    }
+                                    _ => {}
+                                },
+                                Err(e) => {
+                                    self.log.push(format!("Protocol Error: {:?}", e));
+                                    self.session.terminate();
+                                    return Err(e.into());
                                 }
-                            }
+                            },
                             Err(e) => {
                                 self.log.push(format!("Framing Error: {:?}", e));
                                 self.session.terminate();
@@ -343,7 +360,8 @@ impl App {
                         self.session.terminate();
                         return Err(Box::new(ProtocolError::SessionTerminated));
                     }
-                    0x05 => { // Error
+                    0x05 => {
+                        // Error
                         let code = if data.len() > 1 { data[1] } else { 0 };
                         let msg = match code {
                             0x01 => "Role taken (session already has this peer)".to_string(),
@@ -365,12 +383,23 @@ impl App {
     fn draw(&self) -> io::Result<()> {
         let mut stdout = io::stdout();
         execute!(stdout, cursor::MoveTo(0, 0))?;
-        
-        let id_disp = if self.config.session_id.len() > 8 { &self.config.session_id[..8] } else { &self.config.session_id };
-        println!("BlindWire | Session: {} | Role: {}", id_disp, self.config.role);
-        println!("Status: {:<30} | State: {:?}", self.status, self.session.state());
+
+        let id_disp = if self.config.session_id.len() > 8 {
+            &self.config.session_id[..8]
+        } else {
+            &self.config.session_id
+        };
+        println!(
+            "BlindWire | Session: {} | Role: {}",
+            id_disp, self.config.role
+        );
+        println!(
+            "Status: {:<30} | State: {:?}",
+            self.status,
+            self.session.state()
+        );
         println!("{}", "=".repeat(60));
-        
+
         for i in 0..10 {
             execute!(stdout, cursor::MoveTo(0, 3 + i as u16))?;
             execute!(stdout, Clear(ClearType::CurrentLine))?;
@@ -378,7 +407,7 @@ impl App {
                 println!("{}", line);
             }
         }
-        
+
         execute!(stdout, cursor::MoveTo(0, 14))?;
         println!("{}", "-".repeat(60));
         execute!(stdout, Clear(ClearType::CurrentLine))?;

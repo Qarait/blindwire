@@ -1,11 +1,11 @@
-use blindwire_server::run_server;
-use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
 use blindwire_core::frame::Frame;
-use tokio::net::TcpListener;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
+use blindwire_server::run_server;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
-use tokio::time::{pause, advance, sleep};
+use tokio::net::TcpListener;
+use tokio::time::{advance, pause, sleep};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 // --- Helpers ---
 
@@ -16,7 +16,7 @@ fn wrap_relay(frame: Frame) -> Vec<u8> {
     // to_wire() produces: [LENGTH (2B)] [TYPE (1B)] [PAYLOAD]
     // We want just: [TYPE (1B)] [PAYLOAD] — skip the first 2 bytes
     let body = &wire[2..];
-    
+
     let len = body.len() as u16;
     let mut data = vec![0x01]; // RELAY opcode
     data.extend_from_slice(&len.to_be_bytes());
@@ -24,26 +24,40 @@ fn wrap_relay(frame: Frame) -> Vec<u8> {
     data
 }
 
-async fn i_session_step(session: &mut Session, ws: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin)) {
+async fn i_session_step(
+    session: &mut Session,
+    ws: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+) {
     if let Ok(frame) = session.start_handshake() {
         let wrapped = wrap_relay(frame);
         ws.send(Message::Binary(wrapped)).await.unwrap();
     }
 }
 
-async fn process_client_msg(session: &mut Session, ws: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin), data: Vec<u8>) -> Option<SessionReceiveResult> {
+async fn process_client_msg(
+    session: &mut Session,
+    ws: &mut (impl SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    data: Vec<u8>,
+) -> Option<SessionReceiveResult> {
     // RELAY format: [opcode: 1 byte] [len: 2 bytes BE] [body: N bytes]
-    if data.len() < 3 || data[0] != 0x01 { return None; }
-    
+    if data.len() < 3 || data[0] != 0x01 {
+        return None;
+    }
+
     let expected_len = u16::from_be_bytes([data[1], data[2]]) as usize;
-    if data.len() != 3 + expected_len { return None; }
-    
-    let frame = Frame::parse(&data[3..3+expected_len]).ok()?;
+    if data.len() != 3 + expected_len {
+        return None;
+    }
+
+    let frame = Frame::parse(&data[3..3 + expected_len]).ok()?;
     let res = session.on_receive(frame).ok()?;
-    
+
     match &res {
-        SessionReceiveResult::HandshakeResponse(f) | SessionReceiveResult::HandshakeCompleteWithResponse(f) => {
-            ws.send(Message::Binary(wrap_relay(f.clone()))).await.unwrap();
+        SessionReceiveResult::HandshakeResponse(f)
+        | SessionReceiveResult::HandshakeCompleteWithResponse(f) => {
+            ws.send(Message::Binary(wrap_relay(f.clone())))
+                .await
+                .unwrap();
         }
         _ => {}
     }
@@ -63,7 +77,7 @@ async fn test_scenario_a_happy_path() {
     });
 
     let session_id = [0xA1u8; 32];
-    
+
     // 1. Connect Initiator
     println!("Step: Initiator connecting...");
     let (mut i_ws, _) = connect_async(&url).await.unwrap();
@@ -92,7 +106,7 @@ async fn test_scenario_a_happy_path() {
     // 3. Handshake
     let mut initiator = Session::new_initiator().unwrap();
     let mut responder = Session::new_responder().unwrap();
-    
+
     // Transition sessions to Connected state (required before handshake)
     initiator.on_connected().unwrap();
     responder.on_connected().unwrap();
@@ -128,7 +142,9 @@ async fn test_scenario_a_happy_path() {
     i_ws.send(Message::Binary(wrap_relay(ping))).await.unwrap();
 
     let data = r_ws.next().await.unwrap().unwrap().into_data();
-    if let Some(SessionReceiveResult::Message(t)) = process_client_msg(&mut responder, &mut r_ws, data).await {
+    if let Some(SessionReceiveResult::Message(t)) =
+        process_client_msg(&mut responder, &mut r_ws, data).await
+    {
         assert_eq!(t, "ping");
     } else {
         panic!("Expected PING");
@@ -136,7 +152,7 @@ async fn test_scenario_a_happy_path() {
 
     // 5. Terminate
     i_ws.send(Message::Binary(vec![0x02])).await.unwrap(); // QUIT
-    
+
     // Responder receives PEER_QUIT
     let data = r_ws.next().await.unwrap().unwrap().into_data();
     assert_eq!(data[0], 0x03); // PEER_QUIT
@@ -153,7 +169,7 @@ async fn test_scenario_b_framing_violation_kill() {
     });
 
     let (mut ws, _) = connect_async(&url).await.unwrap();
-    
+
     // Join
     let mut join = vec![0x00, 0x69];
     join.extend_from_slice(&[0xB2u8; 32]);
@@ -214,7 +230,7 @@ async fn test_scenario_c_duplicate_role_taken() {
     assert!(i1_ws.next().await.is_some()); // Should get something or just not be closed
 }
 
-// Note: Testing Scenario D (Queue Backpressure) is hard with localhost speed, 
+// Note: Testing Scenario D (Queue Backpressure) is hard with localhost speed,
 // so we skip the detailed mock but verify logic in server.
 // Actually, let's try to fill the 32-capacity queue.
 
@@ -246,14 +262,17 @@ async fn test_scenario_d_bounded_queue_backpressure() {
     // Max queue is 32. Let's send 40.
     for i in 0..40 {
         let msg = vec![0x01, 0x00, 1, i as u8];
-        if i_ws.send(Message::Binary(msg)).await.is_err() { break; }
+        if i_ws.send(Message::Binary(msg)).await.is_err() {
+            break;
+        }
     }
 
     // At some point, the server should send ERROR(QUEUE_FULL) to Initiator
     // because it cannot deliver to Responder.
     let mut error_received = false;
     while let Some(Ok(Message::Binary(data))) = i_ws.next().await {
-        if data[0] == 0x05 && data[1] == 0x05 { // ERROR(QUEUE_FULL)
+        if data[0] == 0x05 && data[1] == 0x05 {
+            // ERROR(QUEUE_FULL)
             error_received = true;
             break;
         }
@@ -292,7 +311,7 @@ async fn test_scenario_e_reconnection_grace_tokio_time() {
     let mut join = vec![0x00, 0x69];
     join.extend_from_slice(&session_id);
     ws.send(Message::Binary(join)).await.unwrap();
-    
+
     // Advance time by 2 more seconds (Total 6s since first join, but 2s since second)
     advance(Duration::from_secs(2)).await;
 
@@ -306,15 +325,15 @@ async fn test_scenario_e_reconnection_grace_tokio_time() {
     let mut join = vec![0x00, 0x69];
     join.extend_from_slice(&session_id);
     ws.send(Message::Binary(join)).await.unwrap();
-    
+
     // If we were responder and joined, we'd see if initiator exists.
     let (mut r_ws, _) = connect_async(&url).await.unwrap();
     let mut r_join = vec![0x00, 0x72];
     r_join.extend_from_slice(&session_id);
     r_ws.send(Message::Binary(r_join)).await.unwrap();
-    
+
     // Responder should see PEER_JOINED if Session was kept.
-    // Actually, Session object itself might linger until TTL, 
+    // Actually, Session object itself might linger until TTL,
     // but the roles (Tx) are dropped.
 }
 

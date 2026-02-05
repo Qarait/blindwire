@@ -50,13 +50,13 @@ pub struct Session {
     state: SessionState,
     role: Role,
     noise: Option<NoiseSession>,
-    
+
     // Timing
     created_at: Instant,
     connected_at: Option<Instant>,
     last_message_at: Option<Instant>,
     disconnection_at: Option<Instant>,
-    
+
     // Handshake tracking (for Noise_XX 3-message flow)
     handshake_messages_sent: u8,
     handshake_messages_received: u8,
@@ -185,7 +185,9 @@ impl Session {
         if self.state == SessionState::Active {
             self.state = SessionState::DisconnectedGrace;
             self.disconnection_at = Some(Instant::now());
-        } else if self.state != SessionState::DisconnectedGrace && self.state != SessionState::Terminated {
+        } else if self.state != SessionState::DisconnectedGrace
+            && self.state != SessionState::Terminated
+        {
             // If disconnected during handshake or created, just terminate
             self.terminate();
         }
@@ -207,9 +209,12 @@ impl Session {
             return Err(ProtocolError::UnexpectedMessageType);
         }
 
-        let noise = self.noise.as_mut().ok_or(ProtocolError::SessionTerminated)?;
+        let noise = self
+            .noise
+            .as_mut()
+            .ok_or(ProtocolError::SessionTerminated)?;
         let msg = noise.write_handshake()?;
-        
+
         self.state = SessionState::Handshaking;
         self.handshake_messages_sent = 1;
 
@@ -228,9 +233,7 @@ impl Session {
                 self.terminate();
                 Err(ProtocolError::SessionTerminated)
             }
-            (SessionState::Terminated, _) => {
-                Err(ProtocolError::SessionTerminated)
-            }
+            (SessionState::Terminated, _) => Err(ProtocolError::SessionTerminated),
             (_, MessageType::Terminate) => {
                 self.terminate();
                 Ok(SessionReceiveResult::Terminated)
@@ -250,9 +253,7 @@ impl Session {
             }
 
             // Data messages
-            (SessionState::Active, MessageType::Data) => {
-                self.process_data(frame.into_payload())
-            }
+            (SessionState::Active, MessageType::Data) => self.process_data(frame.into_payload()),
 
             // Invalid message type for current state
             _ => {
@@ -263,8 +264,14 @@ impl Session {
     }
 
     /// Process a handshake message.
-    fn process_handshake(&mut self, payload: Zeroizing<Vec<u8>>) -> Result<SessionReceiveResult, ProtocolError> {
-        let noise = self.noise.as_mut().ok_or(ProtocolError::SessionTerminated)?;
+    fn process_handshake(
+        &mut self,
+        payload: Zeroizing<Vec<u8>>,
+    ) -> Result<SessionReceiveResult, ProtocolError> {
+        let noise = self
+            .noise
+            .as_mut()
+            .ok_or(ProtocolError::SessionTerminated)?;
 
         // HandshakeState in snow takes &[u8], Zeroizing derefs to Vec<u8> then to &[u8]
         noise.read_handshake(&payload)?;
@@ -278,10 +285,13 @@ impl Session {
         }
 
         // Otherwise, send our response
-        if noise.is_my_turn().map_err(|_| ProtocolError::InternalError)? {
+        if noise
+            .is_my_turn()
+            .map_err(|_| ProtocolError::InternalError)?
+        {
             let response = noise.write_handshake()?;
             self.handshake_messages_sent += 1;
-            
+
             // Update state to Handshaking if not already
             if self.state == SessionState::Connected {
                 self.state = SessionState::Handshaking;
@@ -292,13 +302,13 @@ impl Session {
                 self.state = SessionState::Active;
                 self.last_message_at = Some(Instant::now());
                 return Ok(SessionReceiveResult::HandshakeCompleteWithResponse(
-                    Frame::handshake(response)?
+                    Frame::handshake(response)?,
                 ));
             }
 
-            return Ok(SessionReceiveResult::HandshakeResponse(
-                Frame::handshake(response)?
-            ));
+            return Ok(SessionReceiveResult::HandshakeResponse(Frame::handshake(
+                response,
+            )?));
         }
 
         // Waiting for more messages
@@ -306,8 +316,14 @@ impl Session {
     }
 
     /// Process a data message.
-    fn process_data(&mut self, ciphertext: Zeroizing<Vec<u8>>) -> Result<SessionReceiveResult, ProtocolError> {
-        let noise = self.noise.as_mut().ok_or(ProtocolError::SessionTerminated)?;
+    fn process_data(
+        &mut self,
+        ciphertext: Zeroizing<Vec<u8>>,
+    ) -> Result<SessionReceiveResult, ProtocolError> {
+        let noise = self
+            .noise
+            .as_mut()
+            .ok_or(ProtocolError::SessionTerminated)?;
 
         // Decrypt
         let mut plaintext = noise.decrypt(&ciphertext)?;
@@ -342,7 +358,10 @@ impl Session {
         let plaintext = text.as_bytes();
         let _ = validate_plaintext(plaintext)?;
 
-        let noise = self.noise.as_mut().ok_or(ProtocolError::SessionTerminated)?;
+        let noise = self
+            .noise
+            .as_mut()
+            .ok_or(ProtocolError::SessionTerminated)?;
         let ciphertext = noise.encrypt(plaintext)?;
 
         Frame::data(ciphertext)
@@ -552,7 +571,7 @@ mod tests {
     fn test_initial_state_and_connection() {
         let mut session = Session::new_initiator().unwrap();
         assert_eq!(session.state(), SessionState::Created);
-        
+
         session.on_connected().unwrap();
         assert_eq!(session.state(), SessionState::Connected);
         assert!(session.connected_at.is_some());
@@ -562,10 +581,10 @@ mod tests {
     fn test_handshake_timeout() {
         let mut session = Session::new_initiator().unwrap();
         session.on_connected().unwrap();
-        
+
         // Fast-forward session's internal time isn't possible, but we can sleep
         // Or we can manually adjust the connecting_at if we expose it (we don't for security)
-        // For unit testing, a short sleep or mock if possible. 
+        // For unit testing, a short sleep or mock if possible.
         // Here we'll just check the logic path.
     }
 
@@ -583,7 +602,7 @@ mod tests {
     fn test_handshake_after_active_fails() {
         let mut initiator = Session::new_initiator().unwrap();
         let mut responder = Session::new_responder().unwrap();
-        
+
         // Complete handshake
         initiator.on_connected().unwrap();
         responder.on_connected().unwrap();
@@ -608,10 +627,10 @@ mod tests {
         let mut session = Session::new_initiator().unwrap();
         session.on_connected().unwrap();
         session.state = SessionState::Active; // Simulate active
-        
+
         session.on_disconnected();
         assert_eq!(session.state(), SessionState::DisconnectedGrace);
-        
+
         session.on_connected().unwrap();
         assert_eq!(session.state(), SessionState::Active);
     }
@@ -622,13 +641,12 @@ mod tests {
         let mut session = Session::new_initiator().unwrap();
         session.on_connected().unwrap();
         session.state = SessionState::Active;
-        
+
         session.on_disconnected();
         thread::sleep(Duration::from_millis(5100)); // Sleep just past 5s
-        
+
         let res = session.check_timeouts();
         assert!(res.is_err());
         assert_eq!(session.state(), SessionState::Terminated);
     }
-
 }

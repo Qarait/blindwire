@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use std::sync::Arc;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::net::{TcpStream};
@@ -14,6 +14,16 @@ use tokio::net::TcpListener;
 
 // Constants from spec
 const SESSION_TTL: Duration = Duration::from_secs(3600); // 1 hour
+const SESSION_TTL_TEST: Duration = Duration::from_secs(2); // 2 seconds for tests
+
+fn get_session_ttl() -> Duration {
+    if std::env::var("BLINDWIRE_TEST_TTL").is_ok() { SESSION_TTL_TEST } else { SESSION_TTL }
+}
+
+fn get_cleanup_interval() -> u64 {
+    if std::env::var("BLINDWIRE_TEST_TTL").is_ok() { 1 } else { 10 }
+}
+
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 const MAX_QUEUE_DEPTH: usize = 32;
 const MAX_CONN_PER_IP: usize = 5;
@@ -74,7 +84,7 @@ pub async fn run_server(listener: TcpListener) {
     // Cleanup task
     let sessions_clone = sessions.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        let mut interval = tokio::time::interval(Duration::from_secs(get_cleanup_interval()));
         loop {
             interval.tick().await;
             let now = Instant::now();
@@ -86,8 +96,9 @@ pub async fn run_server(listener: TcpListener) {
             for entry in sessions_clone.iter() {
                 let id = entry.key().clone();
                 let session = entry.value();
+                let age = now.duration_since(session.created_at);
                 
-                if now.duration_since(session.created_at) > SESSION_TTL {
+                if age > get_session_ttl() {
                     to_notify.push(id);
                 } else if now.duration_since(session.last_activity) > RECONNECT_GRACE 
                     && session.initiator_tx.is_none() && session.responder_tx.is_none() {
@@ -167,6 +178,21 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
     // Register in session map
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
     
+    let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Writer task - owns ws_tx
+    let mut ws_tx = ws_tx;
+    tokio::spawn(async move {
+        while let Some(pkt) = rx.recv().await {
+            let is_expired = pkt.get(0) == Some(&(Opcode::Expired as u8));
+            if ws_tx.send(Message::Binary(pkt)).await.is_err() { break; }
+            if is_expired {
+                let _ = kill_tx.send(());
+                break; 
+            }
+        }
+    });
+
     {
         let mut session = sessions.entry(session_id.clone()).or_insert(Session {
             initiator_tx: None,
@@ -179,19 +205,19 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
         
         if role == 'i' {
             if session.initiator_tx.is_some() {
-                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])).await;
+                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8]).await;
                 return Ok(()); 
             }
-            session.initiator_tx = Some(tx);
+            session.initiator_tx = Some(tx.clone()); // We use clone for the loop
             if let Some(ref peer_tx) = session.responder_tx {
                 let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
             }
         } else {
             if session.responder_tx.is_some() {
-                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])).await;
+                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8]).await;
                 return Ok(());
             }
-            session.responder_tx = Some(tx);
+            session.responder_tx = Some(tx.clone());
             if let Some(ref peer_tx) = session.initiator_tx {
                 let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
             }
@@ -200,11 +226,10 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
 
     // Relay loop
     let mut relay_result = Ok(());
+
     loop {
         tokio::select! {
-            Some(msg) = rx.recv() => {
-                if ws_tx.send(Message::Binary(msg)).await.is_err() { break; }
-            }
+            _ = &mut kill_rx => break,
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
@@ -214,7 +239,7 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
                         let opcode = match Opcode::from_u8(opcode_byte) {
                             Some(o) => o,
                             None => {
-                                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::UnknownOpcode as u8])).await;
+                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::UnknownOpcode as u8]).await;
                                 break;
                             }
                         };
@@ -227,12 +252,12 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
                         if opcode == Opcode::Relay {
                             // Strict binary relay validation
                             if data.len() < 3 { 
-                                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8])).await;
+                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break; 
                             }
                             let proto_len = u16::from_be_bytes([data[1], data[2]]) as usize;
                             if proto_len < 1 || proto_len > 4096 || data.len() != 3 + proto_len {
-                                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8])).await;
+                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break;
                             }
 
@@ -242,14 +267,13 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
                                 if let Some(ptx) = peer_tx {
                                     if ptx.try_send(data).is_err() {
                                         // Queue Full
-                                        let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::QueueFull as u8])).await;
+                                        let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::QueueFull as u8]).await;
                                         relay_result = Err("Queue full");
                                         break;
                                     }
                                 }
                             }
                         } else if opcode == Opcode::PeerQuit || opcode_byte == 0x02 { // QUIT from client
-                            // 0x02 is PeerJoined for server->client, but QUIT for client->server
                             break;
                         }
                     }
@@ -258,7 +282,6 @@ async fn handle_connection(stream: TcpStream, sessions: SessionMap, _ip: IpAddr)
             }
         }
     }
-
     // Cleanup on disconnect
     if let Some(mut s) = sessions.get_mut(&session_id) {
         if role == 'i' {

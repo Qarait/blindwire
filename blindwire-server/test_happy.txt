@@ -1,0 +1,132 @@
+﻿cargo : warning: profiles for the non 
+root package will be ignored, specify 
+profiles at the workspace root:
+At line:1 char:1
++ cargo test --test level3_integration 
+test_scenario_a_happy_path -- -- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpeci 
+   fied: (warning: profil...workspace  
+   root::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCo 
+   mmandError
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root 
+package will be ignored, specify 
+profiles at the workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root 
+package will be ignored, specify 
+profiles at the workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root 
+package will be ignored, specify 
+profiles at the workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: unused import: `Zeroize`
+  --> blindwire-core\src\frame.rs:17:15
+   |
+17 | use zeroize::{Zeroize, Zeroizing};
+   |               ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` 
+(part of `#[warn(unused)]`) on by 
+default
+
+warning: `blindwire-core` (lib) 
+generated 1 warning (run `cargo fix 
+--lib -p blindwire-core` to apply 1 
+suggestion)
+warning: constant `MAX_PACKET_SIZE` is 
+never used
+  --> blindwire-server\src\lib.rs:23:7
+   |
+23 | const MAX_PACKET_SIZE: usize = ...
+   |       ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part 
+of `#[warn(unused)]`) on by default
+
+warning: variant `Unauthorized` is 
+never constructed
+  --> blindwire-server\src\lib.rs:42:5
+   |
+38 | enum ErrorCode {
+   |      --------- variant in this 
+enum
+...
+42 |     Unauthorized = 0x04,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `ErrorCode` has derived 
+impls for the traits `Clone` and 
+`Debug`, but these are intentionally 
+ignored during dead code analysis
+
+warning: `blindwire-server` (lib) 
+generated 2 warnings
+warning: unused import: `sleep`
+ --> blindwire-server\tests\level3_inte
+gration.rs:8:35
+  |
+8 | ...e, advance, sleep};
+  |                ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` 
+(part of `#[warn(unused)]`) on by 
+default
+
+warning: `blindwire-server` (test 
+"level3_integration") generated 1 
+warning (run `cargo fix --test 
+"level3_integration"` to apply 1 
+suggestion)
+    Finished `test` profile 
+[unoptimized + debuginfo] target(s) in 
+0.30s
+     Running 
+tests\level3_integration.rs 
+(C:\Users\Loritamus\Desktop\Epherema Te
+xt\target\debug\deps\level3_integration
+-2004e4ca95cc0e3a.exe)
+
+running 1 test
+Step: Initiator connecting...
+Step: Initiator sent JOIN
+Step: Responder connecting...
+Step: Responder sent JOIN
+Step: Initiator waiting for PEER_JOINED...
+Step: Initiator received opcode 0x2
+test test_scenario_a_happy_path has been running for over 60 seconds
+error: test failed, to rerun pass 
+`--test level3_integration`
+
+Caused by:
+  process didn't exit successfully: 
+`C:\Users\Loritamus\Desktop\Epherema Te
+xt\target\debug\deps\level3_integration
+-2004e4ca95cc0e3a.exe 
+test_scenario_a_happy_path 
+--nocapture` (exit code: 0xffffffff)

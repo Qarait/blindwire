@@ -1,0 +1,113 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo test -p blindwire-server --test 
+level3_integration test_scenari ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: unused import: `Zeroize`
+  --> blindwire-core\src\frame.rs:17:15
+   |
+17 | use zeroize::{Zeroize, Zeroizing};
+   |               ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: `blindwire-core` (lib) generated 1 
+warning (run `cargo fix --lib -p 
+blindwire-core` to apply 1 suggestion)
+warning: unused imports: `AtomicBool` and 
+`Ordering`
+ --> blindwire-server\src\lib.rs:3:25
+  |
+3 | use std::sync::atomic::{AtomicBool, 
+Ordering};
+  |                         ^^^^^^^^^^  
+^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: constant `MAX_PACKET_SIZE` is never 
+used
+  --> blindwire-server\src\lib.rs:34:7
+   |
+34 | const MAX_PACKET_SIZE: usize = 4099; 
+   |       ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: variant `Unauthorized` is never 
+constructed
+  --> blindwire-server\src\lib.rs:53:5
+   |
+49 | enum ErrorCode {
+   |      --------- variant in this enum
+...
+53 |     Unauthorized = 0x04,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `ErrorCode` has derived impls for 
+the traits `Clone` and `Debug`, but these are 
+intentionally ignored during dead code 
+analysis
+
+warning: `blindwire-server` (lib) generated 3 
+warnings (run `cargo fix --lib -p 
+blindwire-server` to apply 1 suggestion)
+   Compiling blindwire-server v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server)
+    Finished `test` profile [unoptimized + 
+debuginfo] target(s) in 2.78s
+     Running tests\level3_integration.rs (targ
+et\debug\deps\level3_integration-2004e4ca95cc0
+e3a.exe)
+
+running 1 test
+test test_scenario_f_server_expiry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 4.02s
+

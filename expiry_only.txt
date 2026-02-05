@@ -1,0 +1,139 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:41
++ ... ration* /T; cargo test -p 
+blindwire-server --test level3_integration  
+...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: unused import: `Zeroize`
+  --> blindwire-core\src\frame.rs:17:15
+   |
+17 | use zeroize::{Zeroize, Zeroizing};
+   |               ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: `blindwire-core` (lib) generated 1 
+warning (run `cargo fix --lib -p 
+blindwire-core` to apply 1 suggestion)
+warning: unused imports: `AtomicBool` and 
+`Ordering`
+ --> blindwire-server\src\lib.rs:3:25
+  |
+3 | ...c::{AtomicBool, Ordering};
+  |        ^^^^^^^^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: constant `MAX_PACKET_SIZE` is never 
+used
+  --> blindwire-server\src\lib.rs:24:7
+   |
+24 | const MAX_PACKET_SIZE: usize = ...
+   |       ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: variant `Unauthorized` is never 
+constructed
+  --> blindwire-server\src\lib.rs:43:5
+   |
+39 | enum ErrorCode {
+   |      --------- variant in this enum
+...
+43 |     Unauthorized = 0x04,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `ErrorCode` has derived impls for 
+the traits `Clone` and `Debug`, but these are 
+intentionally ignored during dead code 
+analysis
+
+warning: `blindwire-server` (lib) generated 3 
+warnings (run `cargo fix --lib -p 
+blindwire-server` to apply 1 suggestion)
+warning: unused import: `sleep`
+ --> blindwire-server\tests\level3_integration
+.rs:8:35
+  |
+8 | use tokio::time::{pause, advance, sleep};
+  |                                   ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of 
+`#[warn(unused)]`) on by default
+
+warning: `blindwire-server` (test 
+"level3_integration") generated 1 warning 
+(run `cargo fix --test "level3_integration"` 
+to apply 1 suggestion)
+    Finished `test` profile [unoptimized + 
+debuginfo] target(s) in 0.18s
+     Running tests\level3_integration.rs (targ
+et\debug\deps\level3_integration-2004e4ca95cc0
+e3a.exe)
+
+running 1 test
+
+thread 'test_scenario_f_server_expiry' 
+(24516) panicked at blindwire-server\tests\lev
+el3_integration.rs:321:5:
+`time::pause()` requires the `current_thread` 
+Tokio runtime. This is the default Runtime 
+used by `#[tokio::test].
+note: run with `RUST_BACKTRACE=1` environment 
+variable to display a backtrace
+test test_scenario_f_server_expiry ... FAILED
+
+failures:
+
+failures:
+    test_scenario_f_server_expiry
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p 
+blindwire-server --test level3_integration`

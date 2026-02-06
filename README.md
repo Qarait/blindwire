@@ -1,61 +1,86 @@
-# BlindWire v1.0
+# BlindWire v2.0
 
-Hardened, session-scoped secure messaging for untrusted environments.
+High-assurance encrypted messaging over WebSockets.
 
-BlindWire is a minimal, dissident-grade messaging protocol designed to minimize attack surface and enforce perfect forward secrecy through extreme session isolation. It is not a "chat app" with accounts; it is a point-to-point secure wire with a strictly enforced failure model.
+BlindWire is a minimal, secure messaging protocol designed to minimize attack surface and enforce perfect forward secrecy through extreme session isolation. It is not a "chat app" with accounts; it is a point-to-point secure wire with a strictly enforced failure model.
 
-## Core Philosophy
+## Features (v2.0)
 
-### Hard Failure
-In BlindWire, failure is a first-class security citizen. Any protocol deviation, malformed frame, or validation error results in the immediate termination of the session and the zeroization of all cryptographic material in RAM. There is no recovery, no retry, and no fallback to insecure modes.
-
-### Surface Area Compression
-The signaling server (Relay) is binary-only. There is no JSON parsing, no database, and no long-term state. The server simply validates a 1:1 relay envelope and moves bytes. Minimal surface area is your primary defense against server compromise.
-
-### MTU-Friendly Invariants
-Message sizes are capped at 4000 bytes. This ensures that a complete encrypted frame (including AEAD overhead and signaling headers) fits within a single 4KB wire package. By enforcing this as a hard protocol invariant, we eliminate the complexity of fragmentation and reassembly bugs.
-
-## Threat Model
-
-BlindWire is designed to protect communication against a **Network Adversary** (passive snooping, active MITM) and a **Compromised Relay Server**.
-
-### Out of Scope
-The following risks are explicitly out of scope:
-- **Compromised OS**: If your kernel, shell, or display manager is compromised, BlindWire cannot protect you.
-- **Anonymity**: BlindWire provides encryption and forward secrecy; it is not an anonymity network like Tor. It does not provide advanced traffic masking/padding.
-- **Metadata Protection**: While the relay is binary-only, standard metadata (IP addresses, timing, packet sizes) remains visible to the network and relay.
-- **Persistence Resistance**: Zeroization handles RAM, but cannot protect against persistent OS-level forensic hooks or "cold boot" attacks on memory.
+- **Noise_XX Handshake**: Curve25519, ChaChaPoly, BLAKE2s for mutual authentication and forward secrecy.
+- **TLS Certificate Pinning**: TOFU-and-Lock model prevents MITM attacks at the transport layer.
+- **Rate Limiting**: Per-IP connection limits and global server caps protect against abuse.
+- **QR Session Sharing**: Scan-to-join via `blindwire://` URI scheme.
+- **Hard Failure**: Any protocol deviation terminates the session immediately.
+- **Memory Zeroization**: Best-effort burning of secrets and plaintext from RAM.
 
 ## Project Layout
 
-| Component | Role | Description |
-|-----------|------|-------------|
-| `blindwire-cli` | Client | TUI-based messaging client. |
-| `blindwire-server` | Relay | Binary signaling server (Relay). |
-| `blindwire-core` | Protocol | Core state machine and framing logic. |
-| `blindwire-transport` | Transport | Async secure transport wrapper. |
+| Component | Description |
+|-----------|-------------|
+| `blindwire-cli` | TUI-based messaging client with QR code display. |
+| `blindwire-server` | Binary signaling relay (no JSON, no database). |
+| `blindwire-core` | Protocol state machine, framing, Noise wrapper. |
+| `blindwire-transport` | Async secure transport layer. |
 
-## Usage
+## Installation
 
-### 1. Build
-```powershell
+### From Release
+Download pre-built binaries from [Releases](https://github.com/Qarait/blindwire/releases).
+
+### From Source
+```bash
 cargo build --release
 ```
 
-### 2. Run Signaling Server
-```powershell
+Binaries will be in `target/release/`.
+
+## Usage
+
+### Start the Relay Server
+```bash
 ./blindwire-server
+# Listening on 0.0.0.0:8080
 ```
 
-### 3. Initiate Session
-```powershell
-./blindwire-cli
+### Initiate a Session (Peer A)
+```bash
+./blindwire-cli --server wss://your-relay.example.com:8080
 ```
-The CLI will generate a volatile 32-byte Session ID. Share the Server Address and Session ID with your peer via an out-of-band secure channel.
+A QR code will be displayed. Share it with your peer.
 
-### 4. Join Session
-```powershell
-./blindwire-cli --server <server_addr> --session <id>
+### Join a Session (Peer B)
+```bash
+# Option 1: Scan QR and use URI
+./blindwire-cli --uri "blindwire://relay:8080/SESSION_ID/r"
+
+# Option 2: Manual flags
+./blindwire-cli --server wss://relay:8080 --session SESSION_ID --role r
 ```
 
-**Security Warning**: Fingerprint verification is required. Both peers must verify that the displayed 32-byte session fingerprint matches exactly. If it does not, assume a Man-In-The-Middle (MITM) attack and burn the session immediately.
+### Fingerprint Verification
+After the Noise handshake completes, both peers MUST verify the displayed fingerprint via a secondary secure channel (phone call, Signal, in-person). If fingerprints do not match, assume MITM and terminate immediately.
+
+## Security Model
+
+### Threat Model
+BlindWire protects against:
+- **Passive Network Adversary**: All application data is encrypted with ChaCha20-Poly1305.
+- **Active MITM**: TLS pinning and fingerprint verification block interception.
+- **Compromised Relay**: The server cannot read encrypted payloads. It sees only opaque binary frames.
+
+### Out of Scope
+- **Compromised Endpoint**: If your OS or terminal is compromised, BlindWire cannot protect you.
+- **Anonymity**: This is not Tor. IP addresses are visible to the network and relay.
+- **Metadata**: Timing, packet sizes, and connection patterns are not hidden.
+
+### Known Limitations
+- `TERMINATE` frames are unauthenticated (DoS possible if Session ID is leaked). Scheduled for v2.1.
+- Zeroization is best-effort due to OS memory management constraints.
+
+## Protocol Specification
+
+See [PROTOCOL_V2.md](PROTOCOL_V2.md) for the frozen v2.0 wire format.
+
+## License
+
+MIT

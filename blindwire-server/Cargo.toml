@@ -1,6 +1,6 @@
 [package]
 name = "blindwire-server"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
@@ -11,9 +11,3 @@ futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 dashmap = "5.5"
-
-[profile.release]
-panic = "abort"
-lto = true
-strip = true
-codegen-units = 1

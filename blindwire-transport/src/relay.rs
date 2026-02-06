@@ -35,6 +35,8 @@ mod server_opcode {
     pub const PEER_QUIT: u8 = 0x03;
     pub const EXPIRED: u8 = 0x04;
     pub const ERROR: u8 = 0x05;
+    pub const VERSION_MISMATCH: u8 = 0x06;
+    pub const RATE_LIMIT_EXCEEDED: u8 = 0x07;
 }
 
 /// Internal WebSocket relay transport.
@@ -45,6 +47,14 @@ pub(crate) struct RelayTransport {
     /// Kept for future reconnection logic.
     #[allow(dead_code)]
     session_id: [u8; 32],
+}
+
+impl std::fmt::Debug for RelayTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayTransport")
+            .field("session_id", &hex::encode(self.session_id))
+            .finish()
+    }
 }
 
 impl RelayTransport {
@@ -61,10 +71,11 @@ impl RelayTransport {
 
         let mut transport = Self { ws, session_id };
 
-        // Send JOIN message: [opcode:1][role:1][session_id:32]
-        let mut join_msg = Vec::with_capacity(34);
+        // Send JOIN message: [opcode:1][role:1][version:1][session_id:32]
+        let mut join_msg = Vec::with_capacity(35);
         join_msg.push(opcode::JOIN);
         join_msg.push(role.as_byte());
+        join_msg.push(0x02); // Protocol Version 2.0
         join_msg.extend_from_slice(&session_id);
 
         transport
@@ -93,6 +104,8 @@ impl RelayTransport {
                     return Err(TransportError::UnexpectedResponse(code));
                 }
                 server_opcode::EXPIRED => return Err(TransportError::SessionTerminated),
+                server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
+                server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
                 _ => {
                     // Ignore other messages while waiting for peer
                     continue;
@@ -151,6 +164,8 @@ impl RelayTransport {
                 }
                 server_opcode::PEER_QUIT => return Err(TransportError::PeerDisconnected),
                 server_opcode::EXPIRED => return Err(TransportError::SessionTerminated),
+                server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
+                server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
                 server_opcode::ERROR => {
                     let code = msg.get(1).copied().unwrap_or(0);
                     return Err(TransportError::UnexpectedResponse(code));

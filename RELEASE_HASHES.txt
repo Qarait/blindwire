@@ -1,0 +1,7 @@
+﻿
+Algorithm Hash                                
+--------- ----                                
+SHA256    95EA67E29C5D181CDF622C0C20FDAD02E...
+SHA256    D81BB7343C6314B54D5BD5A1F0A550591...
+
+

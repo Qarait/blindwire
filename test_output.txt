@@ -1,0 +1,90 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo test -p blindwire-cli 2>&1 | Out-File 
+-FilePath test_output.txt ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: unused import: 
+`std::sync::mpsc::channel`
+   --> blindwire-cli\src/main.rs:627:9
+    |
+627 |     use std::sync::mpsc::channel;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by 
+default
+
+warning: `blindwire-cli` (bin "blindwire-cli" 
+test) generated 1 warning (run `cargo fix 
+--bin "blindwire-cli" --tests` to apply 1 
+suggestion)
+    Finished `test` profile [unoptimized + 
+debuginfo] target(s) in 0.64s
+     Running unittests src/main.rs (target\deb
+ug\deps\blindwire_cli-cb77f970a92b1b5a.exe)
+
+running 3 tests
+test tests::test_pinner_tofu_and_lock ... FAILED
+test tests::test_pinner_scoping ... FAILED
+test tests::test_pin_store_load_save ... ok
+
+failures:
+
+---- tests::test_pinner_tofu_and_lock stdout ----
+thread 'tests::test_pinner_tofu_and_lock' panicked at blindwire-cli\src/main.rs:139:36:
+Cannot block the current thread from within a runtime. This happens because a function attempted to block the current thread while the thread is being used to drive asynchronous tasks.
+
+---- tests::test_pinner_scoping stdout ----
+thread 'tests::test_pinner_scoping' panicked at blindwire-cli\src/main.rs:139:36:
+Cannot block the current thread from within a runtime. This happens because a function attempted to block the current thread while the thread is being used to drive asynchronous tasks.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::test_pinner_scoping
+    tests::test_pinner_tofu_and_lock
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p 
+blindwire-cli --bin blindwire-cli`

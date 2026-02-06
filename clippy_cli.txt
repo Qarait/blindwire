@@ -1,0 +1,123 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo clippy -p blindwire-cli --all-targets 
+--all-features -- -D warn ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+    Checking blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)
+error: ambiguous associated item
+  --> blindwire-cli\src\main.rs:45:40
+   |
+45 |     fn try_from(v: u8) -> Result<Self, 
+Self::Error> {
+   |                                        
+^^^^^^^^^^^ help: use fully-qualified syntax: 
+`<Opcode as TryFrom>::Error`
+   |
+   = warning: this was previously accepted by 
+the compiler but is being phased out; it will 
+become a hard error in a future release!
+   = note: for more information, see issue 
+#57644 <https://github.com/rust-lang/rust/issu
+es/57644>
+note: `Error` could refer to the variant 
+defined here
+  --> blindwire-cli\src\main.rs:39:5
+   |
+39 |     Error = 0x05,
+   |     ^^^^^
+note: `Error` could also refer to the 
+associated type defined here
+  --> /rustc/f8297e351a40c1439a467bbbb68790880
+47f50b3\library\core\src\convert\mod.rs:697:5
+   = note: 
+`#[deny(ambiguous_associated_items)]` (part 
+of `#[deny(future_incompatible)]`) on by 
+default
+
+error: field `insecure` is never read
+  --> blindwire-cli\src\main.rs:28:5
+   |
+24 | struct Config {
+   |        ------ field in this struct
+...
+28 |     insecure: bool,
+   |     ^^^^^^^^
+   |
+   = note: `Config` has a derived impl for 
+the trait `Debug`, but this is intentionally 
+ignored during dead code analysis
+   = note: `-D dead-code` implied by `-D 
+warnings`
+   = help: to override `-D warnings` add 
+`#[allow(dead_code)]`
+
+error: redundant pattern matching, consider 
+using `is_err()`
+   --> blindwire-cli\src\main.rs:273:28
+    |
+273 |                     if let Err(_) = 
+self.session.check_timeouts() {
+    |                     
+-------^^^^^^-------------------------------- 
+help: try: `if 
+self.session.check_timeouts().is_err()`
+    |
+    = help: for further information visit http
+s://rust-lang.github.io/rust-clippy/rust-1.91.
+0/index.html#redundant_pattern_matching
+    = note: `-D 
+clippy::redundant-pattern-matching` implied 
+by `-D warnings`
+    = help: to override `-D warnings` add 
+`#[allow(clippy::redundant_pattern_matching)]`
+
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli") due to 3 previous errors
+warning: build failed, waiting for other jobs 
+to finish...
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli" test) due to 3 previous errors

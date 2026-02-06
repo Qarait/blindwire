@@ -1,0 +1,106 @@
+﻿cargo : warning: profiles for the non root package 
+will be ignored, specify profiles at the workspace 
+root:
+At line:1 char:1
++ cargo check -p blindwire-cli 2>&1 | Out-File 
+-FilePath check_errors_6 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warni 
+   ng: profil...workspace root::String) [], Remot  
+  eException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+    Checking blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)
+error[E0277]: `Pinner` doesn't implement `Debug`
+   --> blindwire-cli\src/main.rs:118:29
+    |
+118 | impl ServerCertVerifier for Pinner {
+    |                             ^^^^^^ `Pinner` 
+cannot be formatted using `{:?}`
+    |
+    = help: the trait `Debug` is not implemented 
+for `Pinner`
+    = note: add `#[derive(Debug)]` to `Pinner` or 
+manually `impl Debug for Pinner`
+note: required by a bound in `ServerCertVerifier`
+   --> C:\Users\Loritamus\.cargo\registry\src\index
+.crates.io-6f17d22bba15001f\rustls-0.22.4\src\verif
+y.rs:69:31
+    |
+69  | pub trait ServerCertVerifier: Debug + Send + 
+Sync {
+    |                               ^^^^^ required 
+by this bound in `ServerCertVerifier`
+
+error[E0046]: not all trait items implemented, 
+missing: `verify_tls12_signature`, 
+`verify_tls13_signature`, 
+`supported_verify_schemes`
+   --> blindwire-cli\src/main.rs:118:1
+    |
+118 | impl ServerCertVerifier for Pinner {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing 
+`verify_tls12_signature`, 
+`verify_tls13_signature`, 
+`supported_verify_schemes` in implementation
+    |
+    = help: implement the missing item: `fn 
+verify_tls12_signature(&self, _: &[u8], _: 
+&CertificateDer<'_>, _: &DigitallySignedStruct) -> 
+Result<HandshakeSignatureValid, rustls::Error> { 
+todo!() }`
+    = help: implement the missing item: `fn 
+verify_tls13_signature(&self, _: &[u8], _: 
+&CertificateDer<'_>, _: &DigitallySignedStruct) -> 
+Result<HandshakeSignatureValid, rustls::Error> { 
+todo!() }`
+    = help: implement the missing item: `fn 
+supported_verify_schemes(&self) -> 
+Vec<SignatureScheme> { todo!() }`
+
+error[E0599]: no method named `with_safe_defaults` 
+found for struct `ConfigBuilder` in the current 
+scope
+   --> blindwire-cli\src/main.rs:277:26
+    |
+276 |                       let mut config = 
+ClientConfig::builder()
+    |  ______________________________________-
+277 | |                         
+.with_safe_defaults()
+    | |                         
+-^^^^^^^^^^^^^^^^^^ method not found in 
+`ConfigBuilder<ClientConfig, WantsVerifier>`
+    | |_________________________|
+    |
+
+Some errors have detailed explanations: E0046, 
+E0277, E0599.
+For more information about an error, try `rustc 
+--explain E0046`.
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli") due to 3 previous errors

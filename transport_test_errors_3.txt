@@ -1,0 +1,99 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo test -p blindwire-transport --test 
+e2e_test test_rate_limiting  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: unused variable: `current_conns`
+   --> blindwire-server\src\lib.rs:152:17
+    |
+152 |             let current_conns = {
+    |                 ^^^^^^^^^^^^^ help: if 
+this is intentional, prefix it with an 
+underscore: `_current_conns`
+    |
+    = note: `#[warn(unused_variables)]` on by 
+default
+
+warning: `blindwire-server` (lib) generated 1 
+warning
+   Compiling blindwire-transport v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport)
+error[E0433]: failed to resolve: use of 
+undeclared type `TransportError`
+   --> 
+blindwire-transport\tests\e2e_test.rs:135:13
+    |
+135 |         
+Err(TransportError::RateLimitExceeded) => {
+    |             ^^^^^^^^^^^^^^ use of 
+undeclared type `TransportError`
+    |
+help: consider importing this enum
+    |
+3   + use blindwire_transport::TransportError;
+    |
+
+error[E0433]: failed to resolve: use of 
+undeclared type `TransportError`
+   --> 
+blindwire-transport\tests\e2e_test.rs:166:31
+    |
+166 |     assert!(matches!(res, 
+Err(TransportError::RateLimitExceeded)));
+    |                               
+^^^^^^^^^^^^^^ use of undeclared type 
+`TransportError`
+    |
+help: consider importing this enum
+    |
+3   + use blindwire_transport::TransportError;
+    |
+
+For more information about this error, try 
+`rustc --explain E0433`.
+error: could not compile 
+`blindwire-transport` (test "e2e_test") due 
+to 2 previous errors

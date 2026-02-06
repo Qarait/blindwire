@@ -11,14 +11,12 @@
 //! validation failure, or transport loss) results in **immediate session termination**.
 //!
 //! - **One Strike**: Any validation error in `send_text()` or `recv()` kills the session.
-//! - **Fixed Limits**: The 4000-byte message limit is a hard protocol invariant to
-//!   ensure frames fit within a single MTU-friendly wire package (4096 bytes).
+//! - **Fixed Limits**: The 4000-byte message limit is a hard protocol invariant.
 //! - **No Duplication**: `SecureSession` and `Message` do not implement `Clone`.
-//! - **Implicit Cleanup**: `Drop` defensively burns the session if it hasn't been
-//!   explicitly burned via `burn()`.
-//! - **Zeroization**: All plaintext and key material is zeroized using the `Zeroize`
-//!   trait at the earliest possible point.
-//! - **Strict Framing**: Strict 1:1 WebSocket message to Frame mapping. No buffering.
+//! - **Safe Surface**: No direct `unsafe` code (#![forbid(unsafe_code)]).
+//! - **Implicit Cleanup**: `Drop` defensively burns the session if it hasn't been burned.
+//! - **Zeroization**: Best-effort zeroization of plaintext and keys via the `Zeroize` trait.
+//! - **Strict Framing**: Strict 1:1 WebSocket message to Frame mapping.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

@@ -1,0 +1,101 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo test -p blindwire-cli 2>&1 | Out-File 
+-FilePath test_errors_2.t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+   Compiling blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)
+warning: unused import: 
+`std::sync::mpsc::channel`
+   --> blindwire-cli\src/main.rs:627:9
+    |
+627 |     use std::sync::mpsc::channel;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by 
+default
+
+error[E0277]: 
+`Result<std::sync::MutexGuard<'_, PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>>` is not a future
+   --> blindwire-cli\src/main.rs:672:34
+    |
+672 |             let s = store.lock().await;
+    |                                 -^^^^^
+    |                                 ||
+    |                                 
+|`Result<std::sync::MutexGuard<'_, PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>>` is not a future
+    |                                 help: 
+remove the `.await`
+    |
+    = help: the trait `futures_util::Future` 
+is not implemented for 
+`Result<std::sync::MutexGuard<'_, PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>>`, which is required by 
+`Result<std::sync::MutexGuard<'_, PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>>: std::future::IntoFuture`
+    = note: Result<std::sync::MutexGuard<'_, 
+PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>> must be a future or must 
+implement `IntoFuture` to be awaited
+    = note: required for 
+`Result<std::sync::MutexGuard<'_, PinStore>, 
+PoisonError<std::sync::MutexGuard<'_, 
+PinStore>>>` to implement 
+`std::future::IntoFuture`
+
+For more information about this error, try 
+`rustc --explain E0277`.
+warning: `blindwire-cli` (bin "blindwire-cli" 
+test) generated 1 warning
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli" test) due to 1 previous 
+error; 1 warning emitted

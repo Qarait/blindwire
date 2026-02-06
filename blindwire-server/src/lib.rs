@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -35,6 +36,7 @@ fn get_cleanup_interval() -> u64 {
 const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 const MAX_QUEUE_DEPTH: usize = 32;
 const MAX_CONN_PER_IP: usize = 5;
+const MAX_TOTAL_CONNECTIONS: usize = 1000;
 
 // Packet format [Opcode:1][Length:2][Frame:N]
 // Hard limit: 1 + 2 + 4096 = 4099 bytes.
@@ -49,10 +51,13 @@ enum Opcode {
     PeerQuit = 0x03,
     Expired = 0x04,
     Error = 0x05,
+    VersionMismatch = 0x06,
+    RateLimitExceeded = 0x07,
 }
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ErrorCode {
     RoleTaken = 0x01,
     InvalidFormat = 0x02,
@@ -70,6 +75,8 @@ impl Opcode {
             0x03 => Some(Self::PeerQuit),
             0x04 => Some(Self::Expired),
             0x05 => Some(Self::Error),
+            0x06 => Some(Self::VersionMismatch),
+            0x07 => Some(Self::RateLimitExceeded),
             _ => None,
         }
     }
@@ -88,6 +95,8 @@ type IpConnMap = Arc<DashMap<IpAddr, usize>>;
 pub async fn run_server(listener: TcpListener) {
     let sessions: SessionMap = Arc::new(DashMap::new());
     let ip_conns: IpConnMap = Arc::new(DashMap::new());
+    let ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>> = Arc::new(DashMap::new());
+    let total_conns = Arc::new(AtomicUsize::new(0));
 
     // Cleanup task
     let sessions_clone = sessions.clone();
@@ -139,16 +148,38 @@ pub async fn run_server(listener: TcpListener) {
     while let Ok((stream, peer_addr)) = listener.accept().await {
         let sessions = sessions.clone();
         let ip_conns = ip_conns.clone();
-
-        let ip = peer_addr.ip();
-        let current_conns = *ip_conns.entry(ip).or_insert(0);
-        if current_conns >= MAX_CONN_PER_IP {
-            continue;
-        }
-        ip_conns.entry(ip).and_modify(|c| *c += 1);
+        let ip_bursts = ip_bursts.clone();
+        let total_conns = total_conns.clone();
 
         tokio::spawn(async move {
-            if let Err(_e) = handle_connection(stream, sessions, ip).await {
+            // Global limit check
+            if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
+                total_conns.fetch_sub(1, Ordering::SeqCst);
+                if let Ok(mut ws) =
+                    accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await
+                {
+                    let _ = ws
+                        .send(Message::Binary(vec![Opcode::RateLimitExceeded as u8]))
+                        .await;
+                }
+                return;
+            }
+
+            let ip = peer_addr.ip();
+            let _current_conns = {
+                let mut entry = ip_conns.entry(ip).or_insert(0);
+                if *entry >= MAX_CONN_PER_IP {
+                    // Send error before dropping
+                    if let Ok(mut ws) = accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await {
+                        let _ = ws.send(Message::Binary(vec![Opcode::RateLimitExceeded as u8])).await;
+                    }
+                    return;
+                }
+                *entry += 1;
+                *entry
+            };
+
+            if let Err(_e) = handle_connection(stream, sessions, ip, ip_bursts).await {
                 // Connection closed or error
             }
             ip_conns.entry(ip).and_modify(|c| {
@@ -156,6 +187,7 @@ pub async fn run_server(listener: TcpListener) {
                     *c -= 1
                 }
             });
+            total_conns.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }
@@ -163,7 +195,8 @@ pub async fn run_server(listener: TcpListener) {
 async fn handle_connection(
     stream: TcpStream,
     sessions: SessionMap,
-    _ip: IpAddr,
+    ip: IpAddr,
+    ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let callback = |_req: &Request, response: Response| Ok(response);
 
@@ -175,16 +208,38 @@ async fn handle_connection(
     let role_byte;
 
     if let Some(Ok(Message::Binary(data))) = ws_rx.next().await {
-        if data.len() != 34 || data[0] != Opcode::Join as u8 {
+        // Burst check
+        {
+            let now = Instant::now();
+            let mut bursts = ip_bursts.entry(ip).or_insert(Vec::new());
+            bursts.retain(|&t| now.duration_since(t) < Duration::from_secs(60));
+            if bursts.len() >= 10 {
+                let _ = ws_tx
+                    .send(Message::Binary(vec![Opcode::RateLimitExceeded as u8]))
+                    .await;
+                return Ok(());
+            }
+            bursts.push(now);
+        }
+
+        if data.len() != 35 || data[0] != Opcode::Join as u8 {
+            let error_code = ErrorCode::InvalidFormat;
             let _ = ws_tx
-                .send(Message::Binary(vec![
-                    Opcode::Error as u8,
-                    ErrorCode::InvalidFormat as u8,
-                ]))
+                .send(Message::Binary(vec![Opcode::Error as u8, error_code as u8]))
                 .await;
             return Ok(());
         }
+
         role_byte = data[1];
+        let version_byte = data[2];
+
+        if version_byte != 0x02 {
+            let _ = ws_tx
+                .send(Message::Binary(vec![Opcode::VersionMismatch as u8]))
+                .await;
+            return Ok(());
+        }
+
         if role_byte != 0x69 && role_byte != 0x72 {
             let _ = ws_tx
                 .send(Message::Binary(vec![
@@ -194,7 +249,7 @@ async fn handle_connection(
                 .await;
             return Ok(());
         }
-        session_id = hex::encode(&data[2..34]);
+        session_id = hex::encode(&data[3..35]);
     } else {
         return Ok(());
     }
@@ -210,7 +265,7 @@ async fn handle_connection(
     let mut ws_tx = ws_tx;
     tokio::spawn(async move {
         while let Some(pkt) = rx.recv().await {
-            let is_expired = pkt.get(0) == Some(&(Opcode::Expired as u8));
+            let is_expired = pkt.first() == Some(&(Opcode::Expired as u8));
             if ws_tx.send(Message::Binary(pkt)).await.is_err() {
                 break;
             }
@@ -288,7 +343,7 @@ async fn handle_connection(
                                 break;
                             }
                             let proto_len = u16::from_be_bytes([data[1], data[2]]) as usize;
-                            if proto_len < 1 || proto_len > 4096 || data.len() != 3 + proto_len {
+                            if !(1..=(MAX_PACKET_SIZE - 3)).contains(&proto_len) || data.len() != 3 + proto_len {
                                 let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break;
                             }

@@ -38,6 +38,17 @@ pub struct SecureSession {
     terminated: bool,
 }
 
+impl std::fmt::Debug for SecureSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureSession")
+            .field("config", &self.config)
+            .field("inner", &self.inner)
+            .field("relay", &self.relay)
+            .field("terminated", &self.terminated)
+            .finish()
+    }
+}
+
 // Explicitly NOT implementing Clone
 // impl Clone for SecureSession { ... } // FORBIDDEN
 

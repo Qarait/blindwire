@@ -61,6 +61,12 @@ pub enum ProtocolError {
 
     /// Internal error (should never happen)
     InternalError,
+
+    /// Protocol version mismatch (v2.0 requirement)
+    VersionMismatch,
+
+    /// Relay rate limit exceeded
+    RateLimitExceeded,
 }
 
 impl fmt::Display for ProtocolError {
@@ -84,6 +90,8 @@ impl fmt::Display for ProtocolError {
             Self::SessionTtlExceeded => write!(f, "session ttl exceeded"),
             Self::TransportError => write!(f, "transport error"),
             Self::InternalError => write!(f, "internal error"),
+            Self::VersionMismatch => write!(f, "version mismatch"),
+            Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
         }
     }
 }

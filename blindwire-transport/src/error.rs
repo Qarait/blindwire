@@ -21,6 +21,10 @@ pub enum TransportError {
     Protocol(blindwire_core::ProtocolError),
     /// Unexpected server response.
     UnexpectedResponse(u8),
+    /// Protocol version mismatch.
+    VersionMismatch,
+    /// Rate limit exceeded on relay.
+    RateLimitExceeded,
 
     // --- Validation Failures (Programmer Error / Terminal) ---
     /// Invalid message: contains NUL bytes.
@@ -53,6 +57,8 @@ impl fmt::Display for TransportError {
             Self::WebSocket(msg) => write!(f, "websocket error: {}", msg),
             Self::PeerDisconnected => write!(f, "peer disconnected"),
             Self::UnexpectedResponse(op) => write!(f, "unexpected server response: 0x{:02x}", op),
+            Self::VersionMismatch => write!(f, "protocol version mismatch"),
+            Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
         }
     }
 }

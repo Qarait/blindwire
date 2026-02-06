@@ -1,6 +1,6 @@
 [package]
 name = "blindwire-transport"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 description = "High-level async transport for BlindWire secure messaging"
 license = "MIT"
@@ -20,6 +20,7 @@ futures-util = "0.3"
 
 # Explicit memory zeroization
 zeroize = { version = "1.7", features = ["derive"] }
+hex = "0.4"
 
 # TLS (for wss://)
 native-tls = "0.2"
@@ -31,11 +32,3 @@ blindwire-server = { path = "../blindwire-server" }
 
 [features]
 default = []
-
-[profile.release]
-# Panic = abort reduces binary size and prevents unwinding exploits
-panic = "abort"
-# LTO for smaller binary and cross-crate optimization
-lto = true
-# Strip symbols in release
-strip = true

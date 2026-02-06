@@ -1,0 +1,123 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo check -p blindwire-cli 2>&1 | 
+Out-File -FilePath check_errors_7 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+    Checking blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)
+error[E0277]: `PinStore` doesn't implement 
+`Debug`
+   --> blindwire-cli\src/main.rs:122:5
+    |
+119 | #[derive(Debug)]
+    |          ----- in this derive macro 
+expansion
+...
+122 |     store: 
+Arc<tokio::sync::Mutex<PinStore>>,
+    |     
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+`PinStore` cannot be formatted using `{:?}`
+    |
+    = help: the trait `Debug` is not 
+implemented for `PinStore`, which is required 
+by `Arc<tokio::sync::Mutex<PinStore>>: Debug`
+    = note: add `#[derive(Debug)]` to 
+`PinStore` or manually `impl Debug for 
+PinStore`
+    = help: the trait `Debug` is implemented 
+for `Arc<T, A>`
+    = note: this error originates in the 
+derive macro `Debug` (in Nightly builds, run 
+with -Z macro-backtrace for more info)
+help: consider annotating `PinStore` with 
+`#[derive(Debug)]`
+    |
+87  + #[derive(Debug)]
+88  | struct PinStore {
+    |
+
+error[E0599]: no method named 
+`verify_tls12_signature` found for struct 
+`WebPkiSupportedAlgorithms` in the current 
+scope
+   --> blindwire-cli\src/main.rs:172:14
+    |
+170 | /         
+rustls::crypto::ring::default_provider()
+171 | |             
+.signature_verification_algorithms
+172 | |             
+.verify_tls12_signature(message, cert, dss)
+    | |             -^^^^^^^^^^^^^^^^^^^^^^ 
+method not found in 
+`WebPkiSupportedAlgorithms`
+    | |_____________|
+    |
+
+error[E0599]: no method named 
+`verify_tls13_signature` found for struct 
+`WebPkiSupportedAlgorithms` in the current 
+scope
+   --> blindwire-cli\src/main.rs:183:14
+    |
+181 | /         
+rustls::crypto::ring::default_provider()
+182 | |             
+.signature_verification_algorithms
+183 | |             
+.verify_tls13_signature(message, cert, dss)
+    | |             -^^^^^^^^^^^^^^^^^^^^^^ 
+method not found in 
+`WebPkiSupportedAlgorithms`
+    | |_____________|
+    |
+
+Some errors have detailed explanations: 
+E0277, E0599.
+For more information about an error, try 
+`rustc --explain E0277`.
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli") due to 3 previous errors

@@ -14,7 +14,7 @@
 //! +----------+-------------------+
 //! ```
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::error::ProtocolError;
 

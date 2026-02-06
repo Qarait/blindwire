@@ -1,0 +1,48 @@
+﻿cargo : warning: profiles for the non root package 
+will be ignored, specify profiles at the workspace 
+root:
+At line:1 char:1
++ cargo check -p blindwire-cli 2>&1 | Out-File 
+-FilePath check_errors_4 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warni 
+   ng: profil...workspace root::String) [], Remot  
+  eException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package will be 
+ignored, specify profiles at the workspace root:
+package:   C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+error: failed to select a version for `rustls`.
+    ... required by package `blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)`
+versions that meet the requirements `^0.22` 
+(locked to 0.22.4) are: 0.22.4
+
+the package `blindwire-cli` depends on `rustls`, 
+with features: `dangerous_configuration` but 
+`rustls` does not have these features.
+
+
+failed to select a version for `rustls` which 
+could resolve this conflict

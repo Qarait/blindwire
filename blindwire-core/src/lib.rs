@@ -7,19 +7,20 @@
 //! - Protocol state machine with hard failure semantics
 //! - Noise_XX handshake wrapper
 //!
-//! # Security Invariants
+//! # Security Invariants & Defense-in-Depth
 //!
 //! - Any protocol violation terminates the session
 //! - Any bounds violation terminates the session
 //! - Any cryptographic failure terminates the session
-//! - Keys are zeroized on session end
+//! - Direct use of `unsafe` is forbidden (#![forbid(unsafe_code)])
+//! - Best-effort zeroization of key material and plaintext on session end
 //! - No retries, no recovery, no partial processing
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-#![deny(clippy::unwrap_used)]
-#![deny(clippy::expect_used)]
-#![deny(clippy::panic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::panic))]
 
 pub mod error;
 pub mod frame;

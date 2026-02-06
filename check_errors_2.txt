@@ -1,0 +1,113 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo check -p blindwire-cli 2>&1 | 
+Out-File -FilePath check_errors_2 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+   Compiling rustls v0.21.12
+    Checking tokio-rustls v0.24.1
+    Checking blindwire-cli v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli)
+error[E0308]: mismatched types
+   --> blindwire-cli\src/main.rs:286:53
+    |
+286 |                     
+Some(Connector::Rustls(Arc::new(config)))
+    |                                         
+   -------- ^^^^^^ expected `ClientConfig`, 
+found a different `ClientConfig`
+    |                                         
+   |
+    |                                         
+   arguments to this function are incorrect
+    |
+    = note: `ClientConfig` and `ClientConfig` 
+have similar names, but are actually distinct 
+types
+note: `ClientConfig` is defined in crate 
+`rustls`
+   --> C:\Users\Loritamus\.cargo\registry\src\
+index.crates.io-6f17d22bba15001f\rustls-0.21.1
+2\src\client\client_conn.rs:128:1
+    |
+128 | pub struct ClientConfig {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+note: `ClientConfig` is defined in crate 
+`rustls`
+   --> C:\Users\Loritamus\.cargo\registry\src\
+index.crates.io-6f17d22bba15001f\rustls-0.22.4
+\src\client\client_conn.rs:150:1
+    |
+150 | pub struct ClientConfig {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+    = note: perhaps two different versions of 
+crate `rustls` are being used?
+note: associated function defined here
+   --> /rustc/90b35a6239c3d8bdabc530a6a0816f7f
+f89a0aaf\library\alloc\src\sync.rs:385:12
+
+error[E0599]: no variant or associated item 
+named `InvalidCertificateData` found for enum 
+`rustls::Error` in the current scope
+   --> blindwire-cli\src/main.rs:139:43
+    |
+139 |                 return 
+Err(rustls::Error::InvalidCertificateData(
+    |                                         
+  ^^^^^^^^^^^^^^^^^^^^^^ variant or 
+associated item not found in `Error`
+    |
+help: there is a variant with a similar name
+    |
+139 |                 return 
+Err(rustls::Error::InvalidCertificate(
+    |                                         
+  ~~~~~~~~~~~~~~~~~~
+
+Some errors have detailed explanations: 
+E0308, E0599.
+For more information about an error, try 
+`rustc --explain E0308`.
+error: could not compile `blindwire-cli` (bin 
+"blindwire-cli") due to 2 previous errors

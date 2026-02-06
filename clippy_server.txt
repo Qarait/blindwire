@@ -1,0 +1,115 @@
+﻿cargo : warning: profiles for the non root 
+package will be ignored, specify profiles at 
+the workspace root:
+At line:1 char:1
++ cargo clippy -p blindwire-server --tests 
+--all-features -- -D warning ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   warning: profil...workspace root::String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+    Checking tokio v1.49.0
+    Checking tokio-tungstenite v0.21.0
+    Checking blindwire-server v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server)
+error: redundant pattern matching, consider 
+using `is_some()`
+   --> blindwire-server\tests\level3_integrati
+on.rs:194:15
+    |
+194 |     while let Some(_) = ws.next().await 
+{}
+    |     ----------^^^^^^^------------------ 
+help: try: `while (ws.next().await).is_some()`
+    |
+    = note: this will change drop order of 
+the result, as well as all temporaries
+    = note: add `#[allow(clippy::redundant_pat
+tern_matching)]` if this is important
+    = help: for further information visit http
+s://rust-lang.github.io/rust-clippy/rust-1.91.
+0/index.html#redundant_pattern_matching
+    = note: `-D 
+clippy::redundant-pattern-matching` implied 
+by `-D warnings`
+    = help: to override `-D warnings` add 
+`#[allow(clippy::redundant_pattern_matching)]`
+
+error: redundant pattern matching, consider 
+using `is_some()`
+   --> blindwire-server\tests\level3_integrati
+on.rs:226:15
+    |
+226 |     while let Some(_) = 
+i2_ws.next().await {}
+    |     
+----------^^^^^^^--------------------- help: 
+try: `while (i2_ws.next().await).is_some()`
+    |
+    = note: this will change drop order of 
+the result, as well as all temporaries
+    = note: add `#[allow(clippy::redundant_pat
+tern_matching)]` if this is important
+    = help: for further information visit http
+s://rust-lang.github.io/rust-clippy/rust-1.91.
+0/index.html#redundant_pattern_matching
+
+error: redundant pattern matching, consider 
+using `is_some()`
+   --> blindwire-server\tests\level3_integrati
+on.rs:370:15
+    |
+370 |     while let Some(_) = ws.next().await 
+{}
+    |     ----------^^^^^^^------------------ 
+help: try: `while (ws.next().await).is_some()`
+    |
+    = note: this will change drop order of 
+the result, as well as all temporaries
+    = note: add `#[allow(clippy::redundant_pat
+tern_matching)]` if this is important
+    = help: for further information visit http
+s://rust-lang.github.io/rust-clippy/rust-1.91.
+0/index.html#redundant_pattern_matching
+
+error: could not compile `blindwire-server` 
+(test "level3_integration") due to 3 previous 
+errors

@@ -19,7 +19,7 @@ BlindWire enforces a "One Strike" security policy. Any protocol deviation, inclu
 - **TLS Termination**: Must occur at the server process or a trusted local proxy.
 
 ### 1.2 Cryptography
-- **Pattern**: `Noise_XX_25519_ChaChaPoly_BLAKE2b`.
+- **Pattern**: `Noise_XX_25519_ChaChaPoly_BLAKE2s`.
 - **Key Scope**: Static keys are session-scoped. They are generated in volatile memory at session start and zeroized immediately on termination.
 - **Rekeying**: Permitted but not required for v1.
 - **Verification**: Initiator and Responder should compare fingerprints (32-byte hash) via an external secure channel.

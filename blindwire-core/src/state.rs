@@ -62,6 +62,17 @@ pub struct Session {
     handshake_messages_received: u8,
 }
 
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("state", &self.state)
+            .field("role", &self.role)
+            .field("handshake_sent", &self.handshake_messages_sent)
+            .field("handshake_received", &self.handshake_messages_received)
+            .finish()
+    }
+}
+
 impl Session {
     /// Create a new session as initiator.
     pub fn new_initiator() -> Result<Self, ProtocolError> {

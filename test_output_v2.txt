@@ -1,0 +1,195 @@
+﻿cargo : info: syncing channel updates for 
+'1.83.0-x86_64-pc-windows-msvc'
+At line:1 char:1
++ cargo test -p blindwire-server --test 
+level3_integration 2>&1 | Out-F ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ( 
+   info: syncing c...c-windows-msvc':String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandEr 
+   ror
+ 
+info: latest update on 2024-11-28, rust 
+version 1.83.0 (90b35a623 2024-11-26)
+info: downloading component 'cargo'
+info: downloading component 'clippy'
+info: downloading component 'rust-std'
+info: downloading component 'rust-std' for 
+'x86_64-unknown-linux-gnu'
+info: downloading component 'rustc'
+info: downloading component 'rustfmt'
+info: installing component 'cargo'
+info: installing component 'clippy'
+info: installing component 'rust-std'
+info: installing component 'rust-std' for 
+'x86_64-unknown-linux-gnu'
+info: installing component 'rustc'
+info: installing component 'rustfmt'
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-cli\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+warning: profiles for the non root package 
+will be ignored, specify profiles at the 
+workspace root:
+package:   
+C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-transport\Cargo.toml
+workspace: 
+C:\Users\Loritamus\Desktop\Epherema 
+Text\Cargo.toml
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.22
+   Compiling quote v1.0.44
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+   Compiling stable_deref_trait v1.2.1
+   Compiling subtle v2.6.1
+   Compiling cpufeatures v0.2.17
+   Compiling smallvec v1.15.1
+   Compiling litemap v0.8.1
+   Compiling writeable v0.6.2
+   Compiling getrandom v0.2.17
+   Compiling semver v1.0.27
+   Compiling icu_normalizer_data v2.1.1
+   Compiling icu_properties_data v2.1.2
+   Compiling rand_core v0.6.4
+   Compiling zerocopy v0.8.38
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling windows-link v0.2.1
+   Compiling opaque-debug v0.3.1
+   Compiling rustc_version v0.4.1
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling percent-encoding v2.3.2
+   Compiling generic-array v0.14.7
+   Compiling lock_api v0.4.14
+   Compiling utf8_iter v1.0.4
+   Compiling curve25519-dalek v4.1.3
+   Compiling thiserror v1.0.69
+   Compiling bytes v1.11.1
+   Compiling httparse v1.10.1
+   Compiling snow v0.9.6
+   Compiling windows-targets v0.53.5
+   Compiling windows-sys v0.60.2
+   Compiling form_urlencoded v1.2.2
+   Compiling windows-sys v0.61.2
+   Compiling itoa v1.0.17
+   Compiling pin-project-lite v0.2.16
+   Compiling http v1.4.0
+   Compiling syn v2.0.114
+   Compiling parking_lot v0.12.5
+   Compiling slab v0.4.12
+   Compiling data-encoding v2.10.0
+   Compiling futures-task v0.3.31
+   Compiling byteorder v1.5.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling log v0.4.29
+   Compiling universal-hash v0.5.1
+   Compiling digest v0.10.7
+   Compiling aead v0.5.2
+   Compiling polyval v0.6.2
+   Compiling poly1305 v0.8.0
+   Compiling socket2 v0.6.2
+   Compiling pin-utils v0.1.0
+   Compiling ghash v0.5.1
+   Compiling blake2 v0.10.6
+   Compiling sha1 v0.10.6
+   Compiling sha2 v0.10.9
+   Compiling futures-core v0.3.31
+   Compiling futures-sink v0.3.31
+   Compiling utf-8 v0.7.6
+   Compiling once_cell v1.21.3
+   Compiling hex v0.4.3
+   Compiling hashbrown v0.14.5
+   Compiling dashmap v5.5.3
+   Compiling mio v1.1.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling synstructure v0.13.2
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling zerofrom-derive v0.1.6
+   Compiling yoke-derive v0.8.1
+   Compiling zerovec-derive v0.11.2
+   Compiling displaydoc v0.2.5
+   Compiling zeroize_derive v1.4.3
+   Compiling thiserror-impl v1.0.69
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling futures-macro v0.3.31
+   Compiling tokio-macros v2.6.0
+   Compiling zeroize v1.8.2
+   Compiling cipher v0.4.4
+   Compiling futures-util v0.3.31
+   Compiling tokio v1.49.0
+   Compiling aes v0.8.4
+   Compiling ctr v0.9.2
+   Compiling chacha20 v0.9.1
+   Compiling zerofrom v0.1.6
+   Compiling chacha20poly1305 v0.10.1
+   Compiling yoke v0.8.1
+   Compiling aes-gcm v0.10.3
+   Compiling zerovec v0.11.5
+   Compiling zerotrie v0.2.3
+   Compiling tinystr v0.8.2
+   Compiling potential_utf v0.1.4
+   Compiling blindwire-core v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-core)
+   Compiling icu_collections v2.1.1
+   Compiling icu_locale_core v2.1.1
+   Compiling icu_provider v2.1.1
+   Compiling icu_properties v2.1.2
+   Compiling icu_normalizer v2.1.1
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling tungstenite v0.21.0
+   Compiling tokio-tungstenite v0.21.0
+   Compiling blindwire-server v0.1.0 
+(C:\Users\Loritamus\Desktop\Epherema 
+Text\blindwire-server)
+    Finished `test` profile [unoptimized + 
+debuginfo] target(s) in 34.74s
+     Running tests\level3_integration.rs (targ
+et\debug\deps\level3_integration-43430ade362e8
+464.exe)
+
+running 7 tests
+test test_scenario_b_framing_violation_kill ... ok
+test test_scenario_c_duplicate_role_taken ... ok
+test test_scenario_d_bounded_queue_backpressure ... ok
+test test_scenario_e_reconnection_grace_tokio_time ... ok
+test test_scenario_a_happy_path ... ok
+test test_scenario_g_version_mismatch ... ok
+test test_scenario_f_server_expiry ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.03s
+

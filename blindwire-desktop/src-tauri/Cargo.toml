@@ -1,0 +1,36 @@
+[package]
+name = "blindwire-desktop"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "blindwire_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-deep-link = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blindwire-core = { path = "../../blindwire-core" }
+blindwire-transport = { path = "../../blindwire-transport" }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
+dashmap = "5.5"
+log = "0.4"
+base64 = "0.22"
+uuid = { version = "1.8", features = ["v4", "fast-rng"] }
+sha2 = "0.10"
+getrandom = "0.2"
+hex = "0.4"
+

@@ -34,6 +34,15 @@ jobs:
       - name: Run tests (full workspace)
         run: cargo test --workspace --all-features
 
+      - name: No duplicate rustls versions
+        run: |
+          COUNT=$(cargo tree -d 2>/dev/null | grep -c '^rustls ' || true)
+          if [ "$COUNT" -gt 1 ]; then
+            echo "ERROR: Multiple rustls versions detected ($COUNT):"
+            cargo tree -d | grep 'rustls'
+            exit 1
+          fi
+
       - name: Run integration tests
         run: cargo test -p blindwire-server --test level3_integration
 

@@ -48,6 +48,8 @@ Binaries will be in `target/release/`.
 ```
 A QR code will be displayed. Share it with your peer.
 
+> **Note**: The QR contains no cryptographic keys, but the session ID is a join capability. Share it only with your intended peer via a secure channel.
+
 ### Join a Session (Peer B)
 ```bash
 # Option 1: Scan QR and use URI

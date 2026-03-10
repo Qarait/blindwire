@@ -43,16 +43,17 @@ The `JOIN` packet format is modified to include a version identifier.
 
 BlindWire v2.0 separates signaling metadata from cryptographic payloads.
 
-### Signaling Layer (Plaintext)
+### Signaling Layer (Unencrypted at Application Layer)
 All packets sent to/from the relay start with a 1-byte **Opcode**.
 - `[Opcode:1][Payload:N]`
 - The relay server parses the Opcode to route data or enforce rate limits.
+- **Note**: Signaling is unencrypted at the application layer (visible to the relay), but still inside TLS on the wire for non-local connections.
 
-### Cryptographic Layer (Ciphertext)
+### Cryptographic Layer (End-to-End Ciphertext)
 Encapsulated within the `RELAY (0x01)` opcode:
 - `[RELAY:1][LENGTH:2][PAYLOAD:N]`
 - **Payload** is parsed by the `blindwire-core` state machine:
-  - **Handshake Phase**: Plaintext Noise messages (Noise_XX does not encrypt the first two messages).
+  - **Handshake Phase**: RELAY payloads are Noise handshake messages. Parts of XX messages are encrypted after initial key exchange, but these are not post-handshake transport ciphertext.
   - **Transport Phase**: AEAD Ciphertext (ChaCha20-Poly1305).
   - **Overhead**: Each encrypted frame adds 16 bytes for the Poly1305 MAC.
 
@@ -77,13 +78,28 @@ TLS Pinning in BlindWire is designed as a barrier against active network interce
 
 ---
 
-## 5. New Failure Modes & Error Codes
+## 5. Error Signaling (Fix D v2.1)
 
-| Opcode | Name | Description | Response |
-|--------|------|-------------|----------|
-| `0x06` | **VERSION_MISMATCH** | Client and Server protocol versions are incompatible. | Kill |
-| `0x07` | **RATE_LIMIT_EXCEEDED** | IP or Session has exceeded relay rate limits. | Reject |
-| `0x08` | **PIN_REQUIRED** | (Future) Server requires client to prove knowledge of pin. | Terminal |
+All errors use a single opcode with a sub-code byte:
+
+```
+[ERROR:0x05][ErrorCode:1]
+```
+
+### ErrorCode Table
+
+| Code | Name | Description | Server Action |
+|------|------|-------------|---------------|
+| `0x01` | `ROLE_TAKEN` | Role already occupied in session | Close |
+| `0x02` | `INVALID_FORMAT` | Malformed packet/frame | Close |
+| `0x03` | `UNKNOWN_OPCODE` | Unknown relay opcode | Close |
+| `0x04` | `UNAUTHORIZED` | (Reserved) | Close |
+| `0x05` | `QUEUE_FULL` | Server backpressure | Close |
+| `0x06` | `VERSION_MISMATCH` | Client/server v2 mismatch | Close |
+| `0x07` | `RATE_LIMIT_EXCEEDED` | IP or global limits | Close |
+| `0x08` | `PIN_REQUIRED` | (Future) | Close |
+
+**Key Rule**: There are **no** dedicated opcodes for error conditions. All errors go through `ERROR(0x05)`.
 
 ---
 

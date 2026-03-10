@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::accept_hdr_async;
@@ -42,6 +41,7 @@ const MAX_TOTAL_CONNECTIONS: usize = 1000;
 // Hard limit: 1 + 2 + 4096 = 4099 bytes.
 const MAX_PACKET_SIZE: usize = 4099;
 
+/// Fix D: Core opcodes only - errors use ERROR(0x05) + ErrorCode
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Opcode {
@@ -51,19 +51,20 @@ enum Opcode {
     PeerQuit = 0x03,
     Expired = 0x04,
     Error = 0x05,
-    VersionMismatch = 0x06,
-    RateLimitExceeded = 0x07,
 }
 
+/// Fix D: Error codes for ERROR(0x05) payload
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 enum ErrorCode {
     RoleTaken = 0x01,
     InvalidFormat = 0x02,
     UnknownOpcode = 0x03,
     Unauthorized = 0x04,
     QueueFull = 0x05,
+    VersionMismatch = 0x06,
+    RateLimitExceeded = 0x07,
+    PinRequired = 0x08,
 }
 
 impl Opcode {
@@ -75,8 +76,6 @@ impl Opcode {
             0x03 => Some(Self::PeerQuit),
             0x04 => Some(Self::Expired),
             0x05 => Some(Self::Error),
-            0x06 => Some(Self::VersionMismatch),
-            0x07 => Some(Self::RateLimitExceeded),
             _ => None,
         }
     }
@@ -152,56 +151,51 @@ pub async fn run_server(listener: TcpListener) {
         let total_conns = total_conns.clone();
 
         tokio::spawn(async move {
-            // Global limit check
-            if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
-                total_conns.fetch_sub(1, Ordering::SeqCst);
-                if let Ok(mut ws) =
-                    accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await
-                {
-                    let _ = ws
-                        .send(Message::Binary(vec![Opcode::RateLimitExceeded as u8]))
-                        .await;
-                }
-                return;
-            }
-
             let ip = peer_addr.ip();
-            let _current_conns = {
-                let mut entry = ip_conns.entry(ip).or_insert(0);
-                if *entry >= MAX_CONN_PER_IP {
-                    // Send error before dropping
-                    if let Ok(mut ws) = accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await {
-                        let _ = ws.send(Message::Binary(vec![Opcode::RateLimitExceeded as u8])).await;
-                    }
-                    return;
-                }
-                *entry += 1;
-                *entry
-            };
 
-            if let Err(_e) = handle_connection(stream, sessions, ip, ip_bursts).await {
-                // Connection closed or error
-            }
-            ip_conns.entry(ip).and_modify(|c| {
-                if *c > 0 {
-                    *c -= 1
+            // Perform handshake FIRST, then check limits
+            match accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await {
+                Ok(mut ws) => {
+                    // Global limit check
+                    if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
+                        total_conns.fetch_sub(1, Ordering::SeqCst);
+                        let _ = ws.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8])).await;
+                        return;
+                    }
+
+                    // IP limit check
+                    {
+                        let mut entry = ip_conns.entry(ip).or_insert(0);
+                        if *entry >= MAX_CONN_PER_IP {
+                            let _ = ws.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8])).await;
+                            total_conns.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                        *entry += 1;
+                    }
+
+                    // Proceed with connection
+                    let _ = handle_connection_ws(ws, sessions, ip, ip_bursts).await;
+
+                    // Cleanup
+                    ip_conns.entry(ip).and_modify(|c| { if *c > 0 { *c -= 1 } });
+                    total_conns.fetch_sub(1, Ordering::SeqCst);
                 }
-            });
-            total_conns.fetch_sub(1, Ordering::SeqCst);
+                Err(_e) => {
+                    // Handshake failed
+                }
+            }
         });
     }
 }
 
-async fn handle_connection(
-    stream: TcpStream,
+async fn handle_connection_ws(
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     sessions: SessionMap,
     ip: IpAddr,
     ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let callback = |_req: &Request, response: Response| Ok(response);
-
-    let ws_stream = accept_hdr_async(stream, callback).await?;
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let (mut ws_tx, mut ws_rx) = ws.split();
 
     // 1. Wait for JOIN packet
     let session_id;
@@ -215,7 +209,7 @@ async fn handle_connection(
             bursts.retain(|&t| now.duration_since(t) < Duration::from_secs(60));
             if bursts.len() >= 10 {
                 let _ = ws_tx
-                    .send(Message::Binary(vec![Opcode::RateLimitExceeded as u8]))
+                    .send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8]))
                     .await;
                 return Ok(());
             }
@@ -235,7 +229,7 @@ async fn handle_connection(
 
         if version_byte != 0x02 {
             let _ = ws_tx
-                .send(Message::Binary(vec![Opcode::VersionMismatch as u8]))
+                .send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::VersionMismatch as u8]))
                 .await;
             return Ok(());
         }
@@ -296,6 +290,8 @@ async fn handle_connection(
             session.initiator_tx = Some(tx.clone()); // We use clone for the loop
             if let Some(ref peer_tx) = session.responder_tx {
                 let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
+                // Also notify the joiner that the peer is already here
+                let _ = tx.send(vec![Opcode::PeerJoined as u8]).await;
             }
         } else {
             if session.responder_tx.is_some() {
@@ -307,6 +303,8 @@ async fn handle_connection(
             session.responder_tx = Some(tx.clone());
             if let Some(ref peer_tx) = session.initiator_tx {
                 let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
+                // Also notify the joiner that the peer is already here
+                let _ = tx.send(vec![Opcode::PeerJoined as u8]).await;
             }
         }
     }

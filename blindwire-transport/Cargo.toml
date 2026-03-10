@@ -13,7 +13,7 @@ blindwire-core = { path = "../blindwire-core" }
 tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros"] }
 
 # WebSocket client
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 
 # Stream utilities
 futures-util = "0.3"
@@ -22,13 +22,19 @@ futures-util = "0.3"
 zeroize = { version = "1.7", features = ["derive"] }
 hex = "0.4"
 
-# TLS (for wss://)
-native-tls = "0.2"
+# TLS (for wss:// pinning)
+rustls = { version = "0.22", features = ["ring"] }
+rustls-pki-types = "1.0"
+rustls-webpki = "0.102"
+webpki-roots = "0.26"
+sha2 = "0.10"
 
 [dev-dependencies]
 # For integration tests
 tokio = { version = "1", features = ["full"] }
 blindwire-server = { path = "../blindwire-server" }
+tempfile = "3"
+
 
 [features]
 default = []

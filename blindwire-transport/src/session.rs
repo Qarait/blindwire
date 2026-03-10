@@ -72,7 +72,7 @@ impl SecureSession {
 
         // Connect to signaling server
         let mut relay =
-            RelayTransport::connect(&config.signaling_url, config.session_id, config.role).await?;
+            RelayTransport::connect(&config).await?;
 
         // Create protocol session
         let mut inner = match config.role {

@@ -385,8 +385,9 @@ async fn test_scenario_g_version_mismatch() {
 
     let (mut ws, _) = connect_async(&url).await.unwrap();
 
-    // 1. Try v1 JOIN (34 bytes total)
-    let mut v1_join = vec![0x00, 0x69];
+    // 1. Try v1-style JOIN (wrong version 0x01 instead of 0x02)
+    // Must be 35 bytes total to pass length check, then fail version check
+    let mut v1_join = vec![0x00, 0x69, 0x01]; // JOIN, role=i, version=0x01 (wrong)
     v1_join.extend_from_slice(&[0x11u8; 32]);
     ws.send(Message::Binary(v1_join)).await.unwrap();
 

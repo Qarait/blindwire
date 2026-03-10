@@ -118,29 +118,37 @@ async fn test_rate_limiting() {
     println!("Testing connection limit (5)...");
     let mut handles = Vec::new();
     for i in 0..5 {
+        println!("[TEST] Spawning responder {} with unique session ID...", i);
         let url_clone = url.clone();
+        let mut session_id_bg = session_id;
+        session_id_bg[0] = i as u8; // Make it unique
+
         let handle = tokio::spawn(async move {
-            let config = TransportConfig::responder(url_clone, session_id).with_insecure_dev();
+            let config = TransportConfig::responder(url_clone, session_id_bg).with_insecure_dev();
             // This will block waiting for a handshake, which is fine for held connections
             let _ = SecureSession::connect(config).await;
         });
         handles.push(handle);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // 6th connection should fail with RateLimitExceeded
+    println!("[TEST] Attempting 6th connection (should fail)...");
     let config = TransportConfig::initiator(url.clone(), session_id).with_insecure_dev();
-    let res = SecureSession::connect(config).await;
+    let res = tokio::time::timeout(Duration::from_secs(5), SecureSession::connect(config)).await;
     match res {
-        Err(TransportError::RateLimitExceeded) => {
-            println!("Correctly received RateLimitExceeded on 6th connection (at accept)");
+        Ok(Err(TransportError::RateLimitExceeded)) => {
+            println!("[TEST] SUCCESS: Correctly received RateLimitExceeded on 6th connection");
         }
-        res => panic!("Expected RateLimitExceeded on 6th connection, got {:?}", res),
+        Ok(res) => panic!("[TEST] FAILURE: Expected RateLimitExceeded on 6th connection, got {:?}", res),
+        Err(_) => panic!("[TEST] FAILURE: Timeout waiting for RateLimitExceeded on 6th connection"),
     }
 
     // Part B: Test BURST limit (10 joins)
-    // We need to drop the previous connections first to clear the IP counter
-    drop(handles);
+    // We need to abort previous tasks to clear the server-side IP counter
+    for h in handles {
+        h.abort();
+    }
     tokio::time::sleep(Duration::from_millis(500)).await; // Wait for server to detect dead conns
 
     println!("Testing burst limit (10 JOINs/min)...");
@@ -156,13 +164,26 @@ async fn test_rate_limiting() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         // The server limit is 5 conns, so we must drop some as we go to keep making connections
         if (i + 1) % 4 == 0 {
+             // Abort some handles to free up slots
+             if let Some(bh) = burst_handles.pop() {
+                 bh.abort();
+             }
              tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
     // 11th JOIN attempt should fail with RateLimitExceeded
     let config = TransportConfig::initiator(url.clone(), session_id).with_insecure_dev();
-    let res = SecureSession::connect(config).await;
-    assert!(matches!(res, Err(TransportError::RateLimitExceeded)));
-    println!("Correctly received RateLimitExceeded on 11th JOIN attempt");
+    let res = tokio::time::timeout(Duration::from_secs(2), SecureSession::connect(config)).await;
+    match res {
+        Ok(Err(TransportError::RateLimitExceeded)) => {
+            println!("Correctly received RateLimitExceeded on 11th JOIN attempt");
+        }
+        Ok(res) => panic!("Expected RateLimitExceeded on 11th JOIN attempt, got {:?}", res),
+        Err(_) => panic!("Timeout waiting for RateLimitExceeded on 11th JOIN"),
+    }
+
+    for h in burst_handles {
+        h.abort();
+    }
 }

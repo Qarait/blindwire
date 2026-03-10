@@ -33,6 +33,8 @@ pub struct TransportConfig {
     pub role: Role,
     /// Allow insecure ws:// connections (for localhost development only)
     pub insecure_dev: bool,
+    /// Path to persist TOFU pins (for custom servers)
+    pub pins_path: Option<std::path::PathBuf>,
 }
 
 impl TransportConfig {
@@ -43,6 +45,7 @@ impl TransportConfig {
             session_id,
             role: Role::Initiator,
             insecure_dev: false,
+            pins_path: None,
         }
     }
 
@@ -53,7 +56,14 @@ impl TransportConfig {
             session_id,
             role: Role::Responder,
             insecure_dev: false,
+            pins_path: None,
         }
+    }
+
+    /// Set the path for persisting TOFU pins.
+    pub fn with_pins_path(mut self, path: std::path::PathBuf) -> Self {
+        self.pins_path = Some(path);
+        self
     }
 
     /// Allow insecure ws:// connections (for localhost development only).

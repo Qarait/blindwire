@@ -27,6 +27,7 @@
 pub mod config;
 pub mod error;
 pub mod message;
+mod pinning;
 mod relay;
 pub mod session;
 

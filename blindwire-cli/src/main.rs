@@ -41,7 +41,7 @@ struct Config {
     #[allow(dead_code)]
     insecure: bool,
 }
-
+/// Fix D: Core opcodes only - errors use ERROR(0x05) + ErrorCode
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Opcode {
@@ -51,9 +51,6 @@ enum Opcode {
     PeerQuit = 0x03,
     Expired = 0x04,
     Error = 0x05,
-    VersionMismatch = 0x06,
-    RateLimitExceeded = 0x07,
-    PinRequired = 0x08,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -67,9 +64,38 @@ impl TryFrom<u8> for Opcode {
             0x03 => Ok(Opcode::PeerQuit),
             0x04 => Ok(Opcode::Expired),
             0x05 => Ok(Opcode::Error),
-            0x06 => Ok(Opcode::VersionMismatch),
-            0x07 => Ok(Opcode::RateLimitExceeded),
-            0x08 => Ok(Opcode::PinRequired),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Fix D: Error codes for ERROR(0x05) payload
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCode {
+    RoleTaken = 0x01,
+    InvalidFormat = 0x02,
+    UnknownOpcode = 0x03,
+    Unauthorized = 0x04,
+    QueueFull = 0x05,
+    VersionMismatch = 0x06,
+    RateLimitExceeded = 0x07,
+    PinRequired = 0x08,
+}
+
+impl TryFrom<u8> for ErrorCode {
+    type Error = ();
+
+    fn try_from(v: u8) -> Result<Self, <Self as TryFrom<u8>>::Error> {
+        match v {
+            0x01 => Ok(ErrorCode::RoleTaken),
+            0x02 => Ok(ErrorCode::InvalidFormat),
+            0x03 => Ok(ErrorCode::UnknownOpcode),
+            0x04 => Ok(ErrorCode::Unauthorized),
+            0x05 => Ok(ErrorCode::QueueFull),
+            0x06 => Ok(ErrorCode::VersionMismatch),
+            0x07 => Ok(ErrorCode::RateLimitExceeded),
+            0x08 => Ok(ErrorCode::PinRequired),
             _ => Err(()),
         }
     }
@@ -81,19 +107,46 @@ enum AppEvent {
     MessageReceived(Vec<u8>),
     SecurityViolation(String),
     Notice(String),
+    /// Fix A: Interactive TOFU - new cert requires user confirmation
+    PinPending { host: String, fingerprint: String },
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 struct PinStore {
     pins: HashMap<String, String>,
+    /// Fix A: Pending pins awaiting user confirmation (not persisted)
+    #[serde(skip)]
+    pending_pins: HashMap<String, String>,
 }
 
 impl PinStore {
     fn load() -> Self {
         let path = Self::path();
-        if let Ok(data) = fs::read_to_string(path) {
-            serde_json::from_str(&data).unwrap_or_default()
+        if path.exists() {
+            let data = match fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    // Fix B: Fail closed on read errors
+                    panic!(
+                        "SECURITY FATAL: Cannot read pin store at {:?}: {}. \
+                        Manual intervention required. Delete or fix the file to proceed.",
+                        path, e
+                    );
+                }
+            };
+            match serde_json::from_str(&data) {
+                Ok(store) => store,
+                Err(e) => {
+                    // Fix B: Fail closed on parse errors (corruption)
+                    panic!(
+                        "SECURITY FATAL: Pin store at {:?} is corrupted: {}. \
+                        This could indicate tampering. Manual intervention required.",
+                        path, e
+                    );
+                }
+            }
         } else {
+            // No file exists yet - this is fine, start fresh
             Self::default()
         }
     }
@@ -101,10 +154,28 @@ impl PinStore {
     fn save(&self) {
         let path = Self::path();
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            if let Err(e) = fs::create_dir_all(parent) {
+                panic!(
+                    "SECURITY FATAL: Cannot create pin store directory {:?}: {}. \
+                    Pin persistence failed - security guarantee violated.",
+                    parent, e
+                );
+            }
         }
-        if let Ok(data) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, data);
+        let data = match serde_json::to_string_pretty(self) {
+            Ok(d) => d,
+            Err(e) => panic!(
+                "SECURITY FATAL: Cannot serialize pin store: {}. \
+                This should never happen.",
+                e
+            ),
+        };
+        if let Err(e) = fs::write(&path, data) {
+            panic!(
+                "SECURITY FATAL: Cannot write pin store to {:?}: {}. \
+                Pin persistence failed - security guarantee violated.",
+                path, e
+            );
         }
     }
 
@@ -137,8 +208,11 @@ impl ServerCertVerifier for Pinner {
         let hash = hex::encode(hasher.finalize());
 
         let mut store = self.store.lock().unwrap();
+        
+        // Case 1: We already have a pinned cert for this host
         if let Some(pinned) = store.pins.get(&self.pin_key) {
             if pinned != &hash {
+                // Certificate changed - security violation!
                 let msg = format!(
                     "SECURITY VIOLATION: Relay certificate for {} has changed!\nStored: {}\nCurrent: {}",
                     self.pin_key, pinned, hash
@@ -148,17 +222,36 @@ impl ServerCertVerifier for Pinner {
                     rustls::CertificateError::ApplicationVerificationFailure,
                 ));
             }
-        } else {
-            // TOFU: Trust On First Use
-            store.pins.insert(self.pin_key.clone(), hash.clone());
-            store.save();
-            let _ = self.event_tx.try_send(AppEvent::Notice(format!(
-                "TOFU: Pinned new certificate for {}: {}",
-                self.pin_key, hash
-            )));
+            // Certificate matches pinned - all good
+            return Ok(ServerCertVerified::assertion());
         }
-
-        Ok(ServerCertVerified::assertion())
+        
+        // Case 2: No existing pin - check if user has confirmed this fingerprint
+        if let Some(pending_hash) = store.pending_pins.get(&self.pin_key) {
+            if pending_hash == &hash {
+                // User confirmed this fingerprint - promote to permanent pin
+                store.pins.insert(self.pin_key.clone(), hash.clone());
+                store.pending_pins.remove(&self.pin_key);
+                store.save();
+                let _ = self.event_tx.try_send(AppEvent::Notice(format!(
+                    "TOFU: Certificate for {} has been pinned after user confirmation",
+                    self.pin_key
+                )));
+                return Ok(ServerCertVerified::assertion());
+            }
+        }
+        
+        // Case 3: First encounter - reject and request user confirmation
+        // Fix A: Interactive TOFU - do NOT auto-pin
+        store.pending_pins.insert(self.pin_key.clone(), hash.clone());
+        let _ = self.event_tx.try_send(AppEvent::PinPending {
+            host: self.pin_key.clone(),
+            fingerprint: hash,
+        });
+        
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::ApplicationVerificationFailure,
+        ))
     }
 
     fn verify_tls12_signature(
@@ -234,7 +327,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(parsed) = url::Url::parse(uri_str) {
                     if parsed.scheme() == "blindwire" {
                         let host = parsed.host_str().unwrap_or("localhost");
-                        let port = parsed.port_or_known_default().unwrap_or(80);
+                        let is_local = host == "localhost" || host == "127.0.0.1";
+                        // Fix F: Default to 443 for remote (wss), 80 for local (ws)
+                        let default_port = if is_local { 80 } else { 443 };
+                        let port = parsed.port().unwrap_or(default_port);
                         let path_segments: Vec<&str> =
                             parsed.path_segments().map(|c| c.collect()).unwrap_or_default();
 
@@ -245,7 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 session_id = raw_id.to_string();
                                 role = path_segments[1].chars().next().unwrap_or('r');
 
-                                let scheme = if host == "localhost" || host == "127.0.0.1" {
+                                let scheme = if is_local {
                                     "ws"
                                 } else {
                                     "wss"
@@ -429,18 +525,31 @@ impl App {
                         // Send JOIN
                         let role_byte = if role == 'i' { 0x69u8 } else { 0x72u8 };
                         let version_byte = 0x02u8; // Protocol v2.0
-                        let mut join_packet = vec![Opcode::Join as u8, role_byte, version_byte];
-                        let decoded_id = URL_SAFE_NO_PAD
-                            .decode(&session_id)
-                            .unwrap_or_else(|_| vec![0u8; 16]);
+                        
+                        // Fix C: Strict session ID validation - must be exactly 32 bytes
+                        let decoded_id = match URL_SAFE_NO_PAD.decode(&session_id) {
+                            Ok(bytes) if bytes.len() == 32 => bytes,
+                            Ok(bytes) => {
+                                let _ = etx.send(AppEvent::SecurityViolation(format!(
+                                    "FATAL: Session ID must be exactly 32 bytes, got {}",
+                                    bytes.len()
+                                ))).await;
+                                continue; // Terminal error, retry loop
+                            }
+                            Err(_) => {
+                                let _ = etx.send(AppEvent::SecurityViolation(
+                                    "FATAL: Session ID is not valid base64url".to_string()
+                                )).await;
+                                continue; // Terminal error, retry loop
+                            }
+                        };
                         
                         let mut id_32 = [0u8; 32];
-                        if decoded_id.len() >= 32 {
-                            id_32.copy_from_slice(&decoded_id[..32]);
-                        } else {
-                            id_32[..decoded_id.len()].copy_from_slice(&decoded_id);
-                        }
+                        id_32.copy_from_slice(&decoded_id);
+                        
+                        let mut join_packet = vec![Opcode::Join as u8, role_byte, version_byte];
                         join_packet.extend_from_slice(&id_32);
+
 
                         if ws_stream.send(Message::Binary(join_packet)).await.is_ok() {
                             let _ = etx.send(AppEvent::Connected).await;
@@ -496,6 +605,17 @@ impl App {
                                 KeyCode::Enter => {
                                     if !self.input.is_empty() {
                                         let text = std::mem::take(&mut self.input);
+                                        
+                                        // Fix A: Handle /confirm command for interactive TOFU
+                                        if text.trim() == "/confirm" {
+                                            self.log.push("Certificate confirmation noted.".to_string());
+                                            self.log.push("Reconnecting with trusted certificate...".to_string());
+                                            self.status = "RECONNECTING...".to_string();
+                                            // The pending_pin stays in the shared store,
+                                            // next connection attempt will promote it to permanent
+                                            continue;
+                                        }
+                                        
                                         if self.session.state() == SessionState::Active {
                                             match self.session.send_message(&text) {
                                                 Ok(frame) => {
@@ -561,6 +681,17 @@ impl App {
             }
             AppEvent::Notice(msg) => {
                 self.log.push(msg);
+            }
+            AppEvent::PinPending { host, fingerprint } => {
+                // Fix A: Interactive TOFU - show fingerprint and request confirmation
+                self.status = "CERTIFICATE CONFIRMATION REQUIRED".to_string();
+                self.log.push("═══════════════════════════════════════════════════════════════".to_string());
+                self.log.push(format!("NEW CERTIFICATE for: {}", host));
+                self.log.push(format!("Fingerprint (SHA256): {}", fingerprint));
+                self.log.push("───────────────────────────────────────────────────────────────".to_string());
+                self.log.push("VERIFY THIS FINGERPRINT OUT-OF-BAND before accepting!".to_string());
+                self.log.push("Type /confirm to trust this certificate, or ESC to abort.".to_string());
+                self.log.push("═══════════════════════════════════════════════════════════════".to_string());
             }
             AppEvent::MessageReceived(data) => {
                 if data.is_empty() {
@@ -640,28 +771,35 @@ impl App {
                         return Err(Box::new(ProtocolError::SessionTerminated));
                     }
                     Opcode::Error => {
-                        // Error
-                        let code = if data.len() > 1 { data[1] } else { 0 };
-                        let msg = match code {
-                            0x01 => "Role taken (session already has this peer)".to_string(),
-                            0x02 => "Invalid format (framing error)".to_string(),
-                            0x03 => "Unknown opcode".to_string(),
-                            0x04 => "Unauthorized".to_string(),
-                            0x05 => "Queue full (server backpressure)".to_string(),
-                            0x06 => "Version mismatch (Server is v2.0)".to_string(),
-                            _ => format!("Unknown server error (0x{:02x})", code),
-                        };
-                        self.log.push(format!("Server Error: {}", msg));
-                    }
-                    Opcode::VersionMismatch => {
-                        self.log.push("CRITICAL: Protocol version mismatch! (Server is v2.0, client must match)".to_string());
-                        self.session.terminate();
-                        return Err(Box::new(ProtocolError::VersionMismatch));
-                    }
-                    Opcode::RateLimitExceeded => {
-                        self.log.push("ERROR: Relay rate limit exceeded. Please wait before reconnecting.".to_string());
-                        self.session.terminate();
-                        return Err(Box::new(ProtocolError::RateLimitExceeded));
+                        // Fix D: Unified error handling via ErrorCode
+                        let code = data.get(1).copied().unwrap_or(0);
+                        match ErrorCode::try_from(code) {
+                            Ok(ErrorCode::VersionMismatch) => {
+                                self.log.push("CRITICAL: Protocol version mismatch! (Server is v2.0, client must match)".to_string());
+                                self.session.terminate();
+                                return Err(Box::new(ProtocolError::VersionMismatch));
+                            }
+                            Ok(ErrorCode::RateLimitExceeded) => {
+                                self.log.push("ERROR: Relay rate limit exceeded. Please wait before reconnecting.".to_string());
+                                self.session.terminate();
+                                return Err(Box::new(ProtocolError::RateLimitExceeded));
+                            }
+                            Ok(ErrorCode::RoleTaken) => {
+                                self.log.push("Server Error: Role taken (session already has this peer)".to_string());
+                                self.session.terminate();
+                                return Err(Box::new(ProtocolError::SessionTerminated));
+                            }
+                            Ok(other) => {
+                                self.log.push(format!("Server Error: {:?}", other));
+                                self.session.terminate();
+                                return Err(Box::new(ProtocolError::SessionTerminated));
+                            }
+                            Err(_) => {
+                                self.log.push(format!("Server Error: Unknown code 0x{:02x}", code));
+                                self.session.terminate();
+                                return Err(Box::new(ProtocolError::SessionTerminated));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -793,7 +931,7 @@ mod tests {
         let cert1 = CertificateDer::from(vec![1, 2, 3]);
         let cert2 = CertificateDer::from(vec![4, 5, 6]);
 
-        // 1. First time - TOFU
+        // 1. First time - Interactive TOFU: REJECT and add to pending
         let res = pinner.verify_server_cert(
             &cert1,
             &[],
@@ -801,14 +939,31 @@ mod tests {
             &[],
             UnixTime::now(),
         );
-        assert!(res.is_ok());
+        assert!(res.is_err()); // First encounter MUST reject
         
         {
             let s = store.lock().unwrap();
-            assert_eq!(s.pins.get("wss://test.com:443").is_some(), true);
+            assert!(s.pending_pins.get("wss://test.com:443").is_some());
+            assert!(s.pins.get("wss://test.com:443").is_none());
         }
 
-        // 2. Second time - same cert - OK
+        // 2. Second time - same cert now in pending - user confirmed, promote to permanent
+        let res = pinner.verify_server_cert(
+            &cert1,
+            &[],
+            &ServerName::try_from("test.com").unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(res.is_ok()); // Pending becomes permanent
+        
+        {
+            let s = store.lock().unwrap();
+            assert!(s.pins.get("wss://test.com:443").is_some());
+            assert!(s.pending_pins.get("wss://test.com:443").is_none());
+        }
+
+        // 3. Third time - same cert - OK (already pinned)
         let res = pinner.verify_server_cert(
             &cert1,
             &[],
@@ -818,7 +973,7 @@ mod tests {
         );
         assert!(res.is_ok());
 
-        // 3. Third time - different cert - FAIL
+        // 4. Fourth time - different cert - FAIL (pin mismatch)
         let res = pinner.verify_server_cert(
             &cert2,
             &[],
@@ -850,11 +1005,13 @@ mod tests {
             event_tx: etx.clone(),
         };
 
-        // Pin Key A to Cert 1
-        pinner_a.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).unwrap();
+        // Pin Key A to Cert 1 (two calls: first rejects, second promotes)
+        assert!(pinner_a.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
+        assert!(pinner_a.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_ok());
         
-        // Key B should still be empty and allow Cert 2 (TOFU)
-        pinner_b.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).unwrap();
+        // Key B should still be empty and allow Cert 2 (two calls: first rejects, second promotes)
+        assert!(pinner_b.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
+        assert!(pinner_b.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_ok());
 
         // Now both are locked
         assert!(pinner_a.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());

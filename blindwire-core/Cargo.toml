@@ -15,7 +15,9 @@ zeroize = { version = "1.7", features = ["derive"] }
 
 # Cryptographic hashing and hex encoding
 sha2 = "0.10"
+hkdf = "0.12"
 hex = "0.4"
+url = "2.5"
 
 [dev-dependencies]
 # None yet. Tests use only std.

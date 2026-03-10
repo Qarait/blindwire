@@ -13,11 +13,13 @@ use blindwire_core::frame::Frame;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message as WsMessage, MaybeTlsStream, WebSocketStream,
+    connect_async_tls_with_config, Connector,
+    tungstenite::protocol::Message as WsMessage, MaybeTlsStream, WebSocketStream,
 };
-
-use crate::config::Role;
+use crate::config::TransportConfig;
 use crate::error::TransportError;
+use crate::pinning::{BlindWireVerifier, DiskPinStore};
+use std::sync::Arc;
 
 /// Signaling opcodes (Client → Server).
 mod opcode {
@@ -60,12 +62,33 @@ impl std::fmt::Debug for RelayTransport {
 impl RelayTransport {
     /// Connect to the signaling server and join a session.
     pub async fn connect(
-        url: &str,
-        session_id: [u8; 32],
-        role: Role,
+        config: &TransportConfig,
     ) -> Result<Self, TransportError> {
+        let url = &config.signaling_url;
+        let session_id = config.session_id;
+
+        // Initialize Pin Store
+        let pins_path = config.pins_path.clone().unwrap_or_else(|| {
+            // Fallback to a temporary file if no path provided (best effort)
+            std::env::temp_dir().join("blindwire_pins.txt")
+        });
+        let store = Arc::new(DiskPinStore::new(pins_path));
+
+        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(BlindWireVerifier::new("blindwire.io", store));
+
+        let config_tls = rustls::ClientConfig::builder_with_provider(
+            Arc::new(rustls::crypto::ring::default_provider().into())
+        )
+        .with_safe_default_protocol_versions()
+        .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+
+        let connector = Connector::Rustls(Arc::new(config_tls));
+
         // Establish WebSocket connection
-        let (ws, _response) = connect_async(url)
+        let (ws, _response) = connect_async_tls_with_config(url, None, false, Some(connector))
             .await
             .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
 
@@ -74,7 +97,7 @@ impl RelayTransport {
         // Send JOIN message: [opcode:1][role:1][version:1][session_id:32]
         let mut join_msg = Vec::with_capacity(35);
         join_msg.push(opcode::JOIN);
-        join_msg.push(role.as_byte());
+        join_msg.push(config.role.as_byte());
         join_msg.push(0x02); // Protocol Version 2.0
         join_msg.extend_from_slice(&session_id);
 
@@ -101,11 +124,13 @@ impl RelayTransport {
                 server_opcode::PEER_JOINED => return Ok(()),
                 server_opcode::ERROR => {
                     let code = msg.get(1).copied().unwrap_or(0);
-                    return Err(TransportError::UnexpectedResponse(code));
+                    match code {
+                        server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
+                        server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                        _ => return Err(TransportError::UnexpectedResponse(code)),
+                    }
                 }
                 server_opcode::EXPIRED => return Err(TransportError::SessionTerminated),
-                server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
-                server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
                 _ => {
                     // Ignore other messages while waiting for peer
                     continue;
@@ -164,11 +189,13 @@ impl RelayTransport {
                 }
                 server_opcode::PEER_QUIT => return Err(TransportError::PeerDisconnected),
                 server_opcode::EXPIRED => return Err(TransportError::SessionTerminated),
-                server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
-                server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
                 server_opcode::ERROR => {
                     let code = msg.get(1).copied().unwrap_or(0);
-                    return Err(TransportError::UnexpectedResponse(code));
+                    match code {
+                        server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
+                        server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                        _ => return Err(TransportError::UnexpectedResponse(code)),
+                    }
                 }
                 other => return Err(TransportError::UnexpectedResponse(other)),
             }

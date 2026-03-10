@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -21,6 +21,18 @@ pub struct AppState {
     /// Wrapped in Arc so it can be cheaply cloned into background tasks.
     pub peer_verified: Arc<AtomicBool>,
 
+    /// Monotonically increasing session generation counter.
+    ///
+    /// Incremented at the start of every create_room() or join_room().
+    /// The recv loop captures the generation at spawn time and discards events
+    /// from a different (stale) generation.
+    pub session_generation: Arc<AtomicU64>,
+
+    /// Handle to the current recv loop task.
+    ///
+    /// The new session start aborts this before spawning a replacement.
+    pub recv_loop_handle: Arc<std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+
     /// Stores a pending deep link URI that arrived before the UI was ready.
     pub pending_deep_link: Arc<Mutex<Option<String>>>,
 
@@ -35,6 +47,8 @@ impl AppState {
             pending_identity_changes: DashMap::new(),
             active_session: Arc::new(Mutex::new(None)),
             peer_verified: Arc::new(AtomicBool::new(false)),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            recv_loop_handle: Arc::new(std::sync::Mutex::new(None)),
             pending_deep_link: Arc::new(Mutex::new(None)),
             ui_ready: AtomicBool::new(false),
         }
@@ -73,7 +87,31 @@ impl AppState {
         }
     }
 
-    /// Reset session state (called on leave or error).
+    /// Prepare for a new session:
+    ///   1. Reset peer_verified to false.
+    ///   2. Increment session_generation (stale loops will see a mismatch and exit).
+    ///   3. Abort the old recv loop task if one exists.
+    ///
+    /// Returns the newly minted generation number — pass this into `spawn_recv_loop`.
+    pub fn begin_session(&self) -> u64 {
+        // 1. Reset verification gate
+        self.peer_verified.store(false, Ordering::SeqCst);
+
+        // 2. Increment generation — fetch_add returns the OLD value, so +1
+        let new_gen = self.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // 3. Abort previous recv loop
+        if let Ok(mut handle_guard) = self.recv_loop_handle.lock() {
+            if let Some(handle) = handle_guard.take() {
+                handle.abort();
+            }
+        }
+
+        new_gen
+    }
+
+    /// Reset session state on leave or transport error (mirrors begin_session without
+    /// incrementing the generation — the loop will already be exiting or gone).
     pub fn clear_session_state(&self) {
         self.peer_verified.store(false, Ordering::SeqCst);
     }

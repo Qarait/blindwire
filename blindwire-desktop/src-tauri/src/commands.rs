@@ -76,14 +76,25 @@ fn rand_base64url(n: usize) -> String {
 }
 
 /// Spawn the receive loop for a live session.
-/// Drives `message_received` events and terminates with `join_failed` on error.
+/// Returns the JoinHandle so callers can abort it on session replacement.
+/// 
+/// Generation guard: every event emit is preceded by a generation check.
+/// If `current_generation` no longer matches `my_generation`, the loop exits
+/// immediately without emitting anything — belt + suspenders on top of abort().
 fn spawn_recv_loop(
     session_slot: std::sync::Arc<tokio::sync::Mutex<Option<SecureSession>>>,
     app_handle: tauri::AppHandle,
     clear_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+    my_generation: u64,
+    current_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
+            // Belt: exit immediately if a newer session has started.
+            if current_generation.load(Ordering::SeqCst) != my_generation {
+                break;
+            }
+
             // Lock, recv one message, unlock before emitting.
             let result = {
                 let mut guard = session_slot.lock().await;
@@ -92,6 +103,11 @@ fn spawn_recv_loop(
                     None => break, // Session was taken by leave_room
                 }
             };
+
+            // Suspenders: check again after potentially blocking recv.
+            if current_generation.load(Ordering::SeqCst) != my_generation {
+                break;
+            }
 
             match result {
                 Ok(msg) => {
@@ -121,7 +137,7 @@ fn spawn_recv_loop(
                 }
             }
         }
-    });
+    })
 }
 
 /// After a successful handshake, emit the real verification state.
@@ -193,12 +209,16 @@ pub async fn create_room(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RoomInfo, AppError> {
-    // Reject if already in a session
+    // 1. Reject if already in a session
     if state.has_active_session() {
         return Err(AppError::new("SESSION_ACTIVE", "Please leave the current room first.", false));
     }
 
-    // Mint a random room ID (16 bytes → 22-char base64url) and token
+    // 2. Reset peer_verified, increment generation, abort old recv loop
+    //    begin_session() is the single atomic entry point for all session starts.
+    let my_generation = state.begin_session();
+
+    // 3. Mint a random room ID (16 bytes → 22-char base64url) and token
     let room_id = rand_base64url(16);
     let token = rand_base64url(24);
     // Expiry: 1 hour from now
@@ -217,6 +237,8 @@ pub async fn create_room(
 
     let session_slot = state.active_session.clone();
     let pv_arc = state.peer_verified.clone();
+    let gen_arc = state.session_generation.clone();
+    let handle_slot = state.recv_loop_handle.clone();
     let room_clone = room_id.clone();
 
     // Spawn connect + recv loop
@@ -238,7 +260,10 @@ pub async fn create_room(
             *guard = Some(session);
         }
 
-        spawn_recv_loop(session_slot, app_handle, pv_arc);
+        let handle = spawn_recv_loop(session_slot, app_handle, pv_arc, my_generation, gen_arc);
+        if let Ok(mut h) = handle_slot.lock() {
+            *h = Some(handle);
+        }
     });
 
     Ok(RoomInfo {
@@ -256,14 +281,17 @@ pub async fn join_room(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    // Reject if already in a session
+    // 1. Reject if already in a session
     if state.has_active_session() {
         return Err(AppError::new("SESSION_ACTIVE", "Please leave the current room first.", false));
     }
 
-    // Consume the Rust-side invite payload — JS cannot forge this
+    // 2. Consume the Rust-side invite payload — JS cannot forge this
     let invite = state.consume_invite(&invite_handle)
         .ok_or_else(|| AppError::new("INVITE_INVALID", "Invite handle is invalid, expired, or already used.", false))?;
+
+    // 3. Reset peer_verified, bump generation, abort stale loop
+    let my_generation = state.begin_session();
 
     let session_id = session_id_from_room(&invite.room);
     let relay_url = invite.relay_url.to_string();
@@ -285,6 +313,8 @@ pub async fn join_room(
 
     let session_slot = state.active_session.clone();
     let pv_arc = state.peer_verified.clone();
+    let gen_arc = state.session_generation.clone();
+    let handle_slot = state.recv_loop_handle.clone();
 
     tauri::async_runtime::spawn(async move {
         let session = match SecureSession::connect(config).await {
@@ -303,7 +333,10 @@ pub async fn join_room(
             *guard = Some(session);
         }
 
-        spawn_recv_loop(session_slot, app_handle, pv_arc);
+        let handle = spawn_recv_loop(session_slot, app_handle, pv_arc, my_generation, gen_arc);
+        if let Ok(mut h) = handle_slot.lock() {
+            *h = Some(handle);
+        }
     });
 
     Ok(())

@@ -1,17 +1,20 @@
 # BlindWire v2.0
 
-High-assurance encrypted messaging over WebSockets.
+BlindWire is a zero-account, ephemeral, relay-assisted end-to-end encrypted secure wire for short-lived communication with a strictly enforced failure model.
 
-BlindWire is a minimal, secure messaging protocol designed to minimize attack surface and enforce perfect forward secrecy through extreme session isolation. It is not a "chat app" with accounts; it is a point-to-point secure wire with a strictly enforced failure model.
+It uses an untrusted WebSocket relay for reachability, while message confidentiality is provided end-to-end by Noise_XX. The relay keeps only volatile routing state and cannot read message contents, but it can observe metadata such as IP addresses, timing, roles, session identifiers, and encrypted frame sizes.
+
+BlindWire is not a general chat app, not an anonymity network, and not protection against compromised endpoints.
 
 ## Features (v2.0)
 
-- **Noise_XX Handshake**: Curve25519, ChaChaPoly, BLAKE2s for mutual authentication and forward secrecy.
-- **TLS Certificate Pinning**: TOFU-and-Lock model prevents MITM attacks at the transport layer.
-- **Rate Limiting**: Per-IP connection limits and global server caps protect against abuse.
-- **QR Session Sharing**: Scan-to-join via `blindwire://` URI scheme.
-- **Hard Failure**: Any protocol deviation terminates the session immediately.
-- **Memory Zeroization**: Best-effort burning of secrets and plaintext from RAM.
+- **Noise_XX handshake**: X25519, ChaCha20-Poly1305, and BLAKE2s for forward-secret session establishment.
+- **Fingerprint verification**: users must compare fingerprints out of band to detect active MITM.
+- **TLS pinning**: TOFU-and-lock pinning detects relay certificate identity changes after first trust establishment.
+- **Rate limiting**: per-IP and global server limits reduce relay abuse.
+- **QR session sharing**: scan-to-join via `blindwire://` URI.
+- **Hard failure**: protocol deviations terminate the session immediately.
+- **Best-effort zeroization**: Rust-owned secrets are zeroized where possible; OS and endpoint compromise remain out of scope.
 
 ## Project Layout
 
@@ -64,16 +67,18 @@ After the Noise handshake completes, both peers MUST verify the displayed finger
 
 ## Security Model
 
-### Threat Model
 BlindWire protects against:
-- **Passive Network Adversary**: All application data is encrypted with ChaCha20-Poly1305.
-- **Active MITM**: TLS pinning and fingerprint verification block interception.
-- **Compromised Relay**: The server cannot read encrypted payloads. It sees only opaque binary frames.
+- Passive network observers reading message contents.
+- A compromised relay reading plaintext messages.
+- Active interception attempts when users verify fingerprints out of band.
 
-### Out of Scope
-- **Compromised Endpoint**: If your OS or terminal is compromised, BlindWire cannot protect you.
-- **Anonymity**: This is not Tor. IP addresses are visible to the network and relay.
-- **Metadata**: Timing, packet sizes, and connection patterns are not hidden.
+BlindWire does not protect against:
+- Compromised endpoints.
+- Malicious recipients.
+- Screenshots or screen recording.
+- Traffic analysis.
+- Metadata exposure to the relay or network.
+- Denial of service by the relay.
 
 ### Known Limitations
 - `TERMINATE` frames are unauthenticated (DoS possible if Session ID is leaked). Scheduled for v2.1.

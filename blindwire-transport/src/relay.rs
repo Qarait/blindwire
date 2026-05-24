@@ -39,6 +39,7 @@ mod server_opcode {
     pub const ERROR: u8 = 0x05;
     pub const VERSION_MISMATCH: u8 = 0x06;
     pub const RATE_LIMIT_EXCEEDED: u8 = 0x07;
+    pub const TOKEN: u8 = 0x06;
 }
 
 /// Internal WebSocket relay transport.
@@ -63,7 +64,7 @@ impl RelayTransport {
     /// Connect to the signaling server and join a session.
     pub async fn connect(
         config: &TransportConfig,
-    ) -> Result<Self, TransportError> {
+    ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
         let url = &config.signaling_url;
         let session_id = config.session_id;
 
@@ -101,13 +102,36 @@ impl RelayTransport {
         join_msg.push(0x02); // Protocol Version 2.0
         join_msg.extend_from_slice(&session_id);
 
+        if let Some(token) = config.token {
+            join_msg.extend_from_slice(&token);
+        }
         transport
             .ws
             .send(WsMessage::Binary(join_msg))
             .await
             .map_err(|e| TransportError::WebSocket(e.to_string()))?;
 
-        Ok(transport)
+        let mut token = None;
+        if config.role == crate::config::Role::Initiator {
+            // Initiator must wait for Token (0x06) from server
+            let data = transport.recv_raw().await?;
+            if data.len() == 33 && data[0] == server_opcode::TOKEN {
+                let mut t = [0u8; 32];
+                t.copy_from_slice(&data[1..33]);
+                token = Some(t);
+            } else if data.len() >= 2 && data[0] == server_opcode::ERROR {
+                let code = data[1];
+                match code {
+                    server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
+                    server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                    _ => return Err(TransportError::UnexpectedResponse(code)),
+                }
+            } else {
+                return Err(TransportError::UnexpectedResponse(0)); // Protocol error
+            }
+        }
+
+        Ok((transport, token))
     }
 
     /// Wait for peer to join.

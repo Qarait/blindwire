@@ -30,39 +30,45 @@ async fn test_full_session_e2e() {
     let initiator_url = url.clone();
     let responder_url = url.clone();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
     let initiator_handle = tokio::spawn(async move {
         println!("Initiator connecting...");
         let config = TransportConfig::initiator(initiator_url, session_id).with_insecure_dev();
-        let result = SecureSession::connect(config).await;
-        if let Err(ref e) = result {
-            println!("Initiator connect failed: {:?}", e);
+        let mut session_res = SecureSession::connect(config).await;
+        if let Ok((ref mut s, Some(token))) = session_res {
+            tx.send(token).expect("send token");
+            if let Err(e) = s.handshake().await {
+                 println!("Initiator handshake failed: {:?}", e);
+                 return Err(e);
+            }
         } else {
-            println!("Initiator connect success!");
+            tx.send([0u8; 32]).unwrap();
         }
-        result
+        session_res
     });
 
-    // Small delay to ensure initiator is waiting
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let token = rx.await.expect("recv token");
 
     // Spawn responder - this triggers PEER_JOINED to initiator
     let responder_handle = tokio::spawn(async move {
         println!("Responder connecting...");
-        let config = TransportConfig::responder(responder_url, session_id).with_insecure_dev();
-        let result = SecureSession::connect(config).await;
-        if let Err(ref e) = result {
-            println!("Responder connect failed: {:?}", e);
-        } else {
-            println!("Responder connect success!");
+        let config = TransportConfig::responder(responder_url, session_id, token).with_insecure_dev();
+        let mut session_res = SecureSession::connect(config).await;
+        if let Ok((ref mut s, _)) = session_res {
+             if let Err(e) = s.handshake().await {
+                 println!("Responder handshake failed: {:?}", e);
+                 return Err(e);
+             }
         }
-        result
+        session_res
     });
 
     // Wait for both
     let (i_result, r_result) = tokio::join!(initiator_handle, responder_handle);
 
-    let mut initiator = i_result.expect("task panic").expect("initiator failed");
-    let mut responder = r_result.expect("task panic").expect("responder failed");
+    let (mut initiator, _) = i_result.expect("task panic").expect("initiator failed");
+    let (mut responder, _) = r_result.expect("task panic").expect("responder failed");
 
     println!("Both connected!");
 
@@ -118,24 +124,30 @@ async fn test_rate_limiting() {
     println!("Testing connection limit (5)...");
     let mut handles = Vec::new();
     for i in 0..5 {
-        println!("[TEST] Spawning responder {} with unique session ID...", i);
+        println!("[TEST] Spawning initiator {} with unique session ID...", i);
         let url_clone = url.clone();
         let mut session_id_bg = session_id;
         session_id_bg[0] = i as u8; // Make it unique
 
         let handle = tokio::spawn(async move {
-            let config = TransportConfig::responder(url_clone, session_id_bg).with_insecure_dev();
-            // This will block waiting for a handshake, which is fine for held connections
-            let _ = SecureSession::connect(config).await;
+            let config = TransportConfig::initiator(url_clone, session_id_bg).with_insecure_dev();
+            // Connect and then block on handshake to keep the connection open
+            if let Ok((mut s, _)) = SecureSession::connect(config).await {
+                let _ = s.handshake().await;
+            }
         });
         handles.push(handle);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // 6th connection should fail with RateLimitExceeded
     println!("[TEST] Attempting 6th connection (should fail)...");
-    let config = TransportConfig::initiator(url.clone(), session_id).with_insecure_dev();
+    let mut session_id_bg = session_id;
+    session_id_bg[0] = 99;
+    let config = TransportConfig::initiator(url.clone(), session_id_bg).with_insecure_dev();
+    
+    // Attempt 6th connection
     let res = tokio::time::timeout(Duration::from_secs(5), SecureSession::connect(config)).await;
+
     match res {
         Ok(Err(TransportError::RateLimitExceeded)) => {
             println!("[TEST] SUCCESS: Correctly received RateLimitExceeded on 6th connection");

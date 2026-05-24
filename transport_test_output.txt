@@ -1,70 +1,67 @@
-﻿cargo : warning: profiles for the non root 
-package will be ignored, specify profiles at 
-the workspace root:
+﻿cargo :     Updating 
+crates.io index
 At line:1 char:1
-+ cargo test -p blindwire-transport --test 
-e2e_test test_rate_limiting_ ...
-+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: ( 
-   warning: profil...workspace root::String)  
-   [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandEr 
-   ror
++ cargo test -p 
+blindwire-transport -- 
+--nocapture 2>&1 | 
+Out-String |  ...
++ ~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
+    + CategoryInfo     
+         : NotSpecifi  
+  ed: (    Updating    
+ crates.io index:St    
+ring) [], RemoteEx    
+ception
+    + FullyQualifiedEr 
+   rorId : NativeComm  
+  andError
  
-package:   
-C:\Users\Loritamus\Desktop\Epherema 
-Text\blindwire-cli\Cargo.toml
-workspace: 
-C:\Users\Loritamus\Desktop\Epherema 
-Text\Cargo.toml
-warning: profiles for the non root package 
-will be ignored, specify profiles at the 
-workspace root:
-package:   
-C:\Users\Loritamus\Desktop\Epherema 
-Text\blindwire-core\Cargo.toml
-workspace: 
-C:\Users\Loritamus\Desktop\Epherema 
-Text\Cargo.toml
-warning: profiles for the non root package 
-will be ignored, specify profiles at the 
-workspace root:
-package:   
-C:\Users\Loritamus\Desktop\Epherema 
-Text\blindwire-server\Cargo.toml
-workspace: 
-C:\Users\Loritamus\Desktop\Epherema 
-Text\Cargo.toml
-warning: profiles for the non root package 
-will be ignored, specify profiles at the 
-workspace root:
-package:   
-C:\Users\Loritamus\Desktop\Epherema 
-Text\blindwire-transport\Cargo.toml
-workspace: 
-C:\Users\Loritamus\Desktop\Epherema 
-Text\Cargo.toml
-    Finished `test` profile [unoptimized + 
-debuginfo] target(s) in 0.28s
-     Running tests\e2e_test.rs (target\debug\d
-eps\e2e_test-365f2818d25e0191.exe)
+     Locking 1 package 
+to latest compatible 
+version
+ Downgrading rcgen 
+v0.13.2 -> v0.12.1 
+(available: v0.14.7)
+ Downloading crates ...
+error: failed to 
+download `time-core 
+v0.1.8`
 
-running 1 test
-test test_rate_limiting_burst ... FAILED
+Caused by:
+  unable to get 
+packages from source
 
-failures:
+Caused by:
+  failed to parse 
+manifest at `C:\Users\L
+oritamus\.cargo\registr
+y\src\index.crates.io-6
+f17d22bba15001f\time-co
+re-0.1.8\Cargo.toml`
 
----- test_rate_limiting_burst stdout ----
-thread 'test_rate_limiting_burst' panicked at blindwire-transport\tests\e2e_test.rs:121:9:
-Connection 0 failed but should have succeeded
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Caused by:
+  feature 
+`edition2024` is 
+required
 
+  The package requires 
+the Cargo feature 
+called `edition2024`, 
+but that feature is 
+not stabilized in this 
+version of Cargo 
+(1.83.0 (5ffbef321 
+2024-10-29)).
+  Consider trying a 
+newer version of Cargo 
+(this may require the 
+nightly release).
+  See https://doc.rust-
+lang.org/nightly/cargo/
+reference/unstable.html
+#edition-2024 for more 
+information about the 
+status of this feature.
 
-failures:
-    test_rate_limiting_burst
-
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.12s
-
-error: test failed, to rerun pass `-p 
-blindwire-transport --test e2e_test`

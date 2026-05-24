@@ -3,8 +3,17 @@ name = "blindwire-cli"
 version = "2.0.0"
 edition = "2021"
 
+[[bin]]
+name = "blindwire-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "smoke-responder"
+path = "src/bin/smoke_responder.rs"
+
 [dependencies]
 blindwire-core = { path = "../blindwire-core" }
+blindwire-transport = { path = "../blindwire-transport" }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"

@@ -35,6 +35,8 @@ pub struct TransportConfig {
     pub insecure_dev: bool,
     /// Path to persist TOFU pins (for custom servers)
     pub pins_path: Option<std::path::PathBuf>,
+    /// Optional invitation token (required for Responder)
+    pub token: Option<[u8; 32]>,
 }
 
 impl TransportConfig {
@@ -46,17 +48,19 @@ impl TransportConfig {
             role: Role::Initiator,
             insecure_dev: false,
             pins_path: None,
+            token: None,
         }
     }
 
     /// Create a new configuration for a responder.
-    pub fn responder(signaling_url: impl Into<String>, session_id: [u8; 32]) -> Self {
+    pub fn responder(signaling_url: impl Into<String>, session_id: [u8; 32], token: [u8; 32]) -> Self {
         Self {
             signaling_url: signaling_url.into(),
             session_id,
             role: Role::Responder,
             insecure_dev: false,
             pins_path: None,
+            token: Some(token),
         }
     }
 

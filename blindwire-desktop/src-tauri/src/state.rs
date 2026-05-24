@@ -14,8 +14,8 @@ pub struct AppState {
     /// Opaque identity change handles stored in memory.
     pub pending_identity_changes: DashMap<String, ()>,
 
-    /// The live secure session.
-    pub active_session: Arc<Mutex<Option<SecureSession>>>,
+    /// The channel used to send commands to the active session task.
+    pub session_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::commands::SessionCmd>>>>,
 
     /// True once the peer has been verified by the user (SAS confirmed).
     /// Wrapped in Arc so it can be cheaply cloned into background tasks.
@@ -45,7 +45,7 @@ impl AppState {
         Self {
             parsed_invites: DashMap::new(),
             pending_identity_changes: DashMap::new(),
-            active_session: Arc::new(Mutex::new(None)),
+            session_tx: Arc::new(Mutex::new(None)),
             peer_verified: Arc::new(AtomicBool::new(false)),
             session_generation: Arc::new(AtomicU64::new(0)),
             recv_loop_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -81,7 +81,7 @@ impl AppState {
     /// True if there is a live session that can send/receive.
     pub fn has_active_session(&self) -> bool {
         // Non-blocking check: try_lock. If locked, assume active.
-        match self.active_session.try_lock() {
+        match self.session_tx.try_lock() {
             Ok(guard) => guard.is_some(),
             Err(_) => true, // locked = recv loop is in it, so it's active
         }

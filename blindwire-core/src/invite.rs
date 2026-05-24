@@ -152,11 +152,17 @@ impl InvitePayload {
             return Err(InviteError::OversizedField("u"));
         }
         
-        let mut relay_url = Url::parse(&relay_url_str).map_err(|_| InviteError::InvalidRelayUrl)?;
+        let relay_url = Url::parse(&relay_url_str).map_err(|_| InviteError::InvalidRelayUrl)?;
         if relay_url.scheme() != "wss" {
-            // Note: we might want to allow 'ws' for local dev, but strictly enforcing wss in prod.
-            // If the user needs 'ws' for 127.0.0.1, we could add an unencrypted backdoor, but for now wss only.
-            return Err(InviteError::InvalidRelayUrl);
+            let host = relay_url.host_str().unwrap_or("");
+            let is_local = host == "localhost" || host == "127.0.0.1";
+            
+            // Allow plain ws:// ONLY in debug builds for local testing
+            let allow_insecure = cfg!(debug_assertions) && is_local;
+            
+            if !allow_insecure {
+                return Err(InviteError::InvalidRelayUrl);
+            }
         }
         
         // Strip trailing slash for exact matches
@@ -176,7 +182,14 @@ impl InvitePayload {
             return Err(InviteError::OfficialRelayMustNotHavePin);
         }
 
-        if !is_official && pin.is_none() {
+        let host = relay_url.host_str().unwrap_or("");
+        let is_local = host == "localhost" || host == "127.0.0.1";
+
+        // Localhost/127.0.0.1 bypasses the pin requirement ONLY in debug builds.
+        // In release builds, EVERY custom relay MUST have a pin.
+        let bypass_pin = cfg!(debug_assertions) && is_local;
+
+        if !is_official && !bypass_pin && pin.is_none() {
             return Err(InviteError::CustomRelayRequiresPin);
         }
 

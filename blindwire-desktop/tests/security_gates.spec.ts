@@ -1,0 +1,233 @@
+import { test, expect, chromium } from '@playwright/test';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import net from 'node:net';
+
+import { startRelay, getFreePort, resolveBin, launchDesktop, waitForCDP, waitForAppPage, killProcess } from './harness';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const workspaceRoot = path.resolve(__dirname, '..', '..');
+
+const runResponder = (exe: string, uri: string, relayUrl?: string) => {
+    return new Promise<{code: number | null, output: string}>((resolve) => {
+      console.log(`[RESPONDER] Joining with URI: ${uri}`);
+      const env = { ...process.env, RUST_LOG: 'info' };
+      if (relayUrl) env['BLINDWIRE_RELAY_URL'] = relayUrl;
+
+      const responder = spawn(exe, [uri], {
+        cwd: workspaceRoot,
+        env
+      });
+      
+      let output = '';
+      responder.stdout.on('data', d => output += d.toString());
+      responder.stderr.on('data', d => output += d.toString());
+      
+      responder.on('close', code => {
+        console.log(`[RESPONDER] Exited with code ${code}`);
+        resolve({ code, output });
+      });
+    });
+};
+
+test.describe.configure({ mode: 'serial' });
+
+test.describe('Phase 7: Deep Hardening Security Gates', () => {
+
+  test.beforeAll(async ({}, testInfo) => {
+    testInfo.setTimeout(120000);
+  });
+
+  test.afterAll(async () => {
+    // empty
+  });
+
+  test('Concurrent Race Rejection (Only One Join Wins)', async () => {
+    const { process: server, url: relayUrl } = await startRelay();
+    const debugPort = await getFreePort();
+    const userDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bw-race-'));
+    const appProcess = launchDesktop({ debugPort, userDataDir, relayUrl });
+
+    try {
+        console.log('[TEST] Waiting for CDP...');
+        await waitForCDP(debugPort, appProcess);
+        console.log('[TEST] Connecting over CDP...');
+        const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+        console.log('[TEST] Connected to CDP. Getting default context...');
+        const defaultContext = browser.contexts()[0];
+        console.log('[TEST] Got default context. Getting page...');
+        
+        const page = await waitForAppPage(defaultContext);
+        await page.waitForLoadState('domcontentloaded');
+
+        page.on('pageerror', (err: any) => console.log(`[PAGE-ERR] ${err.message}`));
+        page.on('console', (msg: any) => console.log(`[PAGE-CONSOLE] ${msg.text()}`));
+        console.log(`[TEST] Current Page URL: ${page.url()}`);
+
+        const artifactDir = 'C:\\Users\\Loritamus\\.gemini\\antigravity\\brain\\1ef940e4-a3d8-42e0-9e64-b5ec514dcee3';
+        await page.screenshot({ path: path.join(artifactDir, 'app_home.png') });
+
+        console.log('[TEST] Page found, waiting for UI selector...');
+        try {
+            await page.waitForSelector('button:has-text("Create Secure Room")', { timeout: 10000 });
+        } catch (e) {
+            console.log('[TEST-ERR] Timeout waiting for button. Page content:');
+            console.log(await page.content());
+            throw e;
+        }
+        console.log('[TEST] UI is ready.');
+        await page.click('button:has-text("Create Secure Room")');
+        await page.waitForSelector('#invite-link-input');
+        
+        await page.waitForTimeout(500); // let UI settle
+        await page.screenshot({ path: path.join(artifactDir, 'app_invite_generated.png') });
+        
+        const inviteUri = (await page.inputValue('#invite-link-input')).trim();
+
+        console.log(`[TEST] Racing two responders for URI: ${inviteUri} (relay: ${relayUrl})`);
+        
+        const p1 = runResponder(resolveBin('smoke-responder'), inviteUri, relayUrl);
+        const p2 = runResponder(resolveBin('smoke-responder'), inviteUri, relayUrl);
+
+        console.log('[TEST] Waiting for Verifying screen...');
+        await page.waitForSelector('button:has-text("Matches (Verified)")', { timeout: 15000 });
+        
+        await page.waitForTimeout(500); // let verification UI settle
+        await page.screenshot({ path: path.join(artifactDir, 'app_verifying.png') });
+        
+        console.log('[TEST] Clicking Matches (Verified)...');
+        await page.click('button:has-text("Matches (Verified)")');
+
+        console.log('[TEST] Waiting for Chat input...');
+        await page.waitForSelector('#chat-input', { timeout: 10000 });
+        
+        await page.waitForTimeout(500); // let chat UI settle
+        await page.screenshot({ path: path.join(artifactDir, 'app_chat_empty.png') });
+        
+        console.log('[TEST] Sending mock message...');
+        await page.fill('#chat-input', 'Hello from Initiator! This is a secure end-to-end P2P connection.');
+        await page.click('#chat-send');
+
+        await page.waitForTimeout(500); // let message bubble render
+        await page.screenshot({ path: path.join(artifactDir, 'app_chat_message.png') });
+
+        console.log('[TEST] Waiting for responders to exit...');
+        const [res1, res2] = await Promise.all([p1, p2]);
+
+        const successCount = (res1.code === 0 ? 1 : 0) + (res2.code === 0 ? 1 : 0);
+        const failureCount = (res1.code !== 0 ? 1 : 0) + (res2.code !== 0 ? 1 : 0);
+
+        console.log(`[TEST] Race result: success=${successCount}, failure=${failureCount}`);
+        console.log(`[TEST] res1 output: ${res1.output}`);
+        console.log(`[TEST] res2 output: ${res2.output}`);
+        expect(successCount).toBe(1);
+        expect(failureCount).toBe(1);
+        const failedRes = res1.code !== 0 ? res1 : res2;
+        expect(failedRes.output).toContain('UnexpectedResponse(4)');
+
+        await browser.close();
+    } finally {
+        killProcess(appProcess);
+        killProcess(server);
+        await new Promise(r => setTimeout(r, 1000));
+        await fsp.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test('Server-Side Expiry Rejection', async () => {
+    const { process: server, url: relayUrl } = await startRelay(undefined, '1');
+    const debugPort = await getFreePort();
+    const userDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bw-expiry-'));
+
+    const appProcess = launchDesktop({ debugPort, userDataDir, relayUrl, testTtl: '1' });
+
+    try {
+        await waitForCDP(debugPort, appProcess);
+        const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+        const defaultContext = browser.contexts()[0];
+        
+        const page = await waitForAppPage(defaultContext);
+        await page.waitForLoadState('domcontentloaded');
+        page.on('pageerror', (err: any) => console.log(`[PAGE-ERR] ${err.message}`));
+        page.on('console', (msg: any) => console.log(`[PAGE-CONSOLE] ${msg.text()}`));
+
+        await expect(page.locator('h1:has-text("BlindWire")')).toBeVisible({ timeout: 10000 });
+        await page.waitForTimeout(1000);
+
+        await page.waitForSelector('button:has-text("Create Secure Room")');
+        await page.click('button:has-text("Create Secure Room")');
+        await page.waitForSelector('#invite-link-input');
+        const inviteUri = (await page.inputValue('#invite-link-input')).trim();
+
+        console.log('[TEST] Waiting for 4s for server-side expiry...');
+        await new Promise(resolve => setTimeout(resolve, 4000));
+
+        const res = await runResponder(resolveBin('smoke-responder'), inviteUri, relayUrl);
+        expect(res.code).not.toBe(0);
+        expect(res.output.includes('UnexpectedResponse(9)') || res.output.includes('UnexpectedResponse(4)')).toBe(true);
+
+        await browser.close();
+    } finally {
+        killProcess(appProcess);
+        killProcess(server);
+        await new Promise(r => setTimeout(r, 1000));
+        await fsp.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  test('Room/Token Binding Mismatch', async () => {
+    const { process: server, url: relayUrl } = await startRelay();
+    const debugPort = await getFreePort();
+    const userDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'bw-mismatch-'));
+
+    const appProcess = launchDesktop({ debugPort, userDataDir, relayUrl });
+
+    try {
+        await waitForCDP(debugPort, appProcess);
+        const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+        const defaultContext = browser.contexts()[0];
+        
+        let page = await waitForAppPage(defaultContext);
+        await page.waitForLoadState('domcontentloaded');
+        page.on('pageerror', (err: any) => console.log(`[PAGE-ERR] ${err.message}`));
+        page.on('console', (msg: any) => console.log(`[PAGE-CONSOLE] ${msg.text()}`));
+
+        await expect(page.locator('h1:has-text("BlindWire")')).toBeVisible({ timeout: 10000 });
+        await page.waitForTimeout(1000);
+
+        await page.click('button:has-text("Create Secure Room")');
+        await page.waitForSelector('#invite-link-input');
+        const uriA = (await page.inputValue('#invite-link-input')).trim();
+        const tokenA = uriA.match(/t=([A-Za-z0-9_-]+)/)?.[1];
+
+        console.log('[TEST] Canceling first invite session...');
+        await page.click('button:has-text("Cancel")');
+
+        await page.reload();
+        await expect(page.locator('h1:has-text("BlindWire")')).toBeVisible({ timeout: 10000 });
+        await page.waitForTimeout(1000);
+        await page.click('button:has-text("Create Secure Room")');
+        await page.waitForSelector('#invite-link-input');
+        const uriB = (await page.inputValue('#invite-link-input')).trim();
+
+        const mismatchUri = uriB.replace(/t=[A-Za-z0-9_-]+/, `t=${tokenA}`);
+        console.log(`[TEST] Mismatch URI: ${mismatchUri}`);
+
+        const res = await runResponder(resolveBin('smoke-responder'), mismatchUri, relayUrl);
+        expect(res.code).not.toBe(0);
+        expect(res.output).toContain('UnexpectedResponse(4)');
+
+        await browser.close();
+    } finally {
+        killProcess(appProcess);
+        killProcess(server);
+        await new Promise(r => setTimeout(r, 1000));
+        await fsp.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});

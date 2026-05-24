@@ -14,15 +14,18 @@ type IdentityInfo = { relay: string; old_identicon: string; old_sas: string[]; n
 type ViewState =
   | { type: 'HOME' }
   | { type: 'CONFIRM_JOIN'; summary: ParsedInviteSummary }
+  | { type: 'INVITE_QR'; info: RoomInfo }
   | { type: 'CONNECTING' }
   | { type: 'VERIFYING'; peer: VerificationState }
   | { type: 'IDENTITY_CHANGE'; info: IdentityInfo }
-  | { type: 'CHAT'; room: string }
+  | { type: 'CHAT'; room: string; peer_disconnected?: boolean }
   | { type: 'ERROR'; error: AppError };
 
 function App() {
   const [view, setViewState] = useState<ViewState>({ type: 'HOME' });
   const [linkInput, setLinkInput] = useState('');
+  const [messages, setMessages] = useState<{ text: string; timestamp: number; isMe: boolean }[]>([]);
+  const [chatInput, setChatInput] = useState('');
 
   useEffect(() => {
     // Listen for blindwire:// links
@@ -36,14 +39,42 @@ function App() {
       setViewState({ type: 'VERIFYING', peer: event.payload });
     });
 
+    // Listen for inbound messages
+    const unlistenMsg = listen<{ text: string; timestamp: number }>('message_received', (event) => {
+      setMessages(m => [...m, { ...event.payload, isMe: false }]);
+    });
+
     // Listen for identity change requirement
     const unlistenIdentity = listen<IdentityInfo>('identity_change_required', (event) => {
       setViewState({ type: 'IDENTITY_CHANGE', info: event.payload });
     });
 
     // Listen for room entry
-    const unlistenRoom = listen<{ room: string }>('room_state_changed', (event) => {
-      setViewState({ type: 'CHAT', room: event.payload.room });
+    const unlistenRoom = listen<{ room: string, connected: boolean, reason?: string }>('room_state_changed', (event) => {
+      console.log("Room state changed:", event.payload);
+      setViewState(prev => {
+        if (event.payload.connected) {
+          return { type: 'CHAT', room: event.payload.room, peer_disconnected: false };
+        } else {
+          if (prev.type === 'HOME') return prev;
+          if (prev.type === 'CHAT') {
+            return { ...prev, peer_disconnected: true };
+          }
+          if (event.payload.reason) {
+            return { type: 'ERROR', error: { code: event.payload.reason, message: "Connection lost: " + event.payload.reason, retryable: false } };
+          }
+          return { type: 'HOME' };
+        }
+      });
+    });
+
+    // Listen for join failures
+    const unlistenJoinFailed = listen<AppError>('join_failed', (event) => {
+      console.log("Join failed:", event.payload);
+      setViewState(prev => {
+        if (prev.type === 'HOME') return prev;
+        return { type: 'ERROR', error: event.payload };
+      });
     });
 
     // Let Rust know the UI is ready to receive queued events
@@ -54,6 +85,8 @@ function App() {
       unlistenVerify.then(f => f());
       unlistenIdentity.then(f => f());
       unlistenRoom.then(f => f());
+      unlistenMsg.then(f => f());
+      unlistenJoinFailed.then(f => f());
     };
   }, []);
 
@@ -77,14 +110,33 @@ function App() {
   };
 
   const handleCreateRoom = async () => {
+    console.log("handleCreateRoom starting");
     setViewState({ type: 'CONNECTING' });
     try {
       const info = await invoke<RoomInfo>('create_room');
-      // Transition out
-      setViewState({ type: 'CHAT', room: info.room_id });
+      console.log("create_room ok", info);
+      setViewState({ type: 'INVITE_QR', info });
+    } catch (e: any) {
+      console.error("create_room error", e);
+      setViewState({ type: 'ERROR', error: e as AppError });
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim()) return;
+    try {
+      const text = chatInput;
+      await invoke('send_message', { text });
+      setMessages(m => [...m, { text, timestamp: Date.now(), isMe: true }]);
+      setChatInput('');
     } catch (e: any) {
       setViewState({ type: 'ERROR', error: e as AppError });
     }
+  };
+
+  const clearMessages = () => {
+    setMessages([]);
+    setChatInput('');
   };
 
   return (
@@ -96,7 +148,7 @@ function App() {
             <h1>BlindWire</h1>
             <p>Secure, canonical rendezvous.</p>
 
-            <button onClick={handleCreateRoom}>
+            <button onClick={() => { clearMessages(); handleCreateRoom(); }}>
               Create Secure Room
             </button>
 
@@ -108,6 +160,41 @@ function App() {
                 onChange={e => setLinkInput(e.target.value)}
               />
               <button onClick={() => handleParseInvite(linkInput)} style={{ width: 'auto' }}>Go</button>
+            </div>
+          </div>
+        )}
+
+        {view.type === 'INVITE_QR' && (
+          <div className="glass-card">
+            <h1>Invite Peer</h1>
+            <p>Share this link or scan the QR code to start the secure session.</p>
+
+            <div className="qr-container" style={{ margin: '1.5rem auto', background: 'white', padding: '1rem', borderRadius: '1rem', width: 'fit-content' }}>
+              {/* For now, just a placeholder or text representation of QR */}
+              <div style={{ color: 'black', fontFamily: 'monospace', fontSize: '10px', lineHeight: '1' }}>
+                {view.info.qr_string.slice(0, 100)}...
+              </div>
+            </div>
+
+            <div className="info-row">
+              <span className="info-label">Invite Link</span>
+              <input
+                type="text"
+                readOnly
+                value={view.info.invite_uri}
+                className="invite-link-input"
+                id="invite-link-input"
+                style={{ width: '100%', marginTop: '0.5rem' }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
+              <button className="secondary" onClick={async () => { try { await invoke('leave_room'); } catch(e){} setViewState({ type: 'HOME' }); }}>Cancel</button>
+              <button onClick={() => {
+                // In a real app we'd wait for PeerJoined event, 
+                // but we can also manually "Proceed" if we want to watch the handshake
+                console.log("Waiting for peer...");
+              }}>Waiting for peer...</button>
             </div>
           </div>
         )}
@@ -178,12 +265,38 @@ function App() {
         {view.type === 'CHAT' && (
           <div className="chat-container">
             <div className="chat-messages">
-              <p style={{ textAlign: 'center', opacity: 0.5 }}>Connected to room {view.room}</p>
+              <p style={{ textAlign: 'center', opacity: 0.5, marginBottom: '1rem' }}>
+                Connected to room {view.room}
+              </p>
+              {messages.map((m, i) => (
+                <div key={i} className={`message-bubble ${m.isMe ? 'me' : 'peer'}`}>
+                  <div className="message-content">{m.text}</div>
+                  <div className="message-time">{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                </div>
+              ))}
             </div>
             <div className="chat-input-area">
-              <input type="text" placeholder="Send an encrypted message..." />
-              <button>Send</button>
-              <button className="danger" onClick={() => setViewState({ type: 'HOME' })}>Leave</button>
+              <input
+                type="text"
+                placeholder={view.peer_disconnected ? "Peer disconnected" : "Send an encrypted message..."}
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !view.peer_disconnected && handleSendMessage()}
+                disabled={view.peer_disconnected}
+                id="chat-input"
+              />
+              <button 
+                onClick={handleSendMessage} 
+                disabled={view.peer_disconnected}
+                id="chat-send"
+              >
+                Send
+              </button>
+              <button className="danger" onClick={async () => { 
+                await invoke('leave_room');
+                clearMessages(); 
+                setViewState({ type: 'HOME' }); 
+              }}>Leave</button>
             </div>
           </div>
         )}

@@ -74,3 +74,14 @@ jobs:
 
       - name: Run security audit
         run: cargo audit
+
+      - name: Setup Node.js for frontend audit
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Frontend npm audit
+        working-directory: blindwire-desktop
+        run: |
+          npm install --package-lock-only
+          npm audit --audit-level=high

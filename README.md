@@ -1,4 +1,6 @@
-# BlindWire v2.0
+# BlindWire (Public Beta / Technical Preview)
+
+**Protocol v2.0 | Desktop App v0.1.0-beta**
 
 BlindWire is a zero-account, ephemeral, relay-assisted end-to-end encrypted secure wire for short-lived communication with a strictly enforced failure model.
 
@@ -8,13 +10,13 @@ BlindWire is not a general chat app, not an anonymity network, and not protectio
 
 ## Features (v2.0)
 
-- **Noise_XX handshake**: X25519, ChaCha20-Poly1305, and BLAKE2s for forward-secret session establishment.
+- **Noise_XX handshake**: X25519, AEAD ciphertext using ChaCha20-Poly1305, and BLAKE2s for forward-secret session establishment.
 - **Fingerprint verification**: users must compare fingerprints out of band to detect active MITM.
-- **TLS pinning**: TOFU-and-lock pinning detects relay certificate identity changes after first trust establishment.
+- **TLS pinning**: Silent TOFU-and-lock pinning detects relay certificate identity changes. If the first connection is intercepted, the attacker's key may be silently pinned. Subsequent mismatches hard-fail.
 - **Rate limiting**: per-IP and global server limits reduce relay abuse.
+- **Hard failure**: protocol deviations, idle timeouts (10 minutes), or reaching the absolute session TTL (1 hour) terminate the session immediately.
 - **QR session sharing**: scan-to-join via `blindwire://` URI.
-- **Hard failure**: protocol deviations terminate the session immediately.
-- **Best-effort zeroization**: Rust-owned secrets are zeroized where possible; OS and endpoint compromise remain out of scope.
+- **Best-effort zeroization**: Rust-owned keys and selected buffers are zeroized where possible; Tauri/WebView displayed plaintext is outside this guarantee. OS and endpoint compromise remain out of scope.
 
 ## Project Layout
 
@@ -44,6 +46,7 @@ Binaries will be in `target/release/`.
 ./blindwire-server
 # Listening on 0.0.0.0:8080
 ```
+> **Deployment Note (Let's Encrypt)**: Because clients use strict SPKI pinning, relay operators *must* reuse the certificate private key across renewals (e.g., using `--reuse-key` with Certbot or equivalent Caddy settings). If the underlying private key changes upon renewal, all existing clients will encounter a hard failure and be permanently locked out from that relay.
 
 ### Initiate a Session (Peer A)
 ```bash

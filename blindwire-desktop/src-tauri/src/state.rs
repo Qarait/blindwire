@@ -1,10 +1,9 @@
+use blindwire_core::invite::InvitePayload;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use blindwire_core::invite::InvitePayload;
-use blindwire_transport::SecureSession;
 
 /// App state injected into Tauri commands.
 pub struct AppState {
@@ -38,6 +37,12 @@ pub struct AppState {
 
     /// Flag set once the UI confirms it is ready to receive events.
     pub ui_ready: AtomicBool,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppState {

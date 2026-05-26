@@ -7,13 +7,14 @@ use crossterm::{
 };
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::ClientConfig;
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     DigitallySignedStruct, SignatureScheme,
 };
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -21,10 +22,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use rustls::ClientConfig;
 use tokio_tungstenite::client_async_tls_with_config;
-use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::Connector;
 
 use blindwire_core::frame::{Frame, LENGTH_PREFIX_SIZE};
 use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
@@ -108,7 +108,10 @@ enum AppEvent {
     SecurityViolation(String),
     Notice(String),
     /// Fix A: Interactive TOFU - new cert requires user confirmation
-    PinPending { host: String, fingerprint: String },
+    PinPending {
+        host: String,
+        fingerprint: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -208,7 +211,7 @@ impl ServerCertVerifier for Pinner {
         let hash = hex::encode(hasher.finalize());
 
         let mut store = self.store.lock().unwrap();
-        
+
         // Case 1: We already have a pinned cert for this host
         if let Some(pinned) = store.pins.get(&self.pin_key) {
             if pinned != &hash {
@@ -225,7 +228,7 @@ impl ServerCertVerifier for Pinner {
             // Certificate matches pinned - all good
             return Ok(ServerCertVerified::assertion());
         }
-        
+
         // Case 2: No existing pin - check if user has confirmed this fingerprint
         if let Some(pending_hash) = store.pending_pins.get(&self.pin_key) {
             if pending_hash == &hash {
@@ -240,15 +243,17 @@ impl ServerCertVerifier for Pinner {
                 return Ok(ServerCertVerified::assertion());
             }
         }
-        
+
         // Case 3: First encounter - reject and request user confirmation
         // Fix A: Interactive TOFU - do NOT auto-pin
-        store.pending_pins.insert(self.pin_key.clone(), hash.clone());
+        store
+            .pending_pins
+            .insert(self.pin_key.clone(), hash.clone());
         let _ = self.event_tx.try_send(AppEvent::PinPending {
             host: self.pin_key.clone(),
             fingerprint: hash,
         });
-        
+
         Err(rustls::Error::InvalidCertificate(
             rustls::CertificateError::ApplicationVerificationFailure,
         ))
@@ -331,8 +336,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Fix F: Default to 443 for remote (wss), 80 for local (ws)
                         let default_port = if is_local { 80 } else { 443 };
                         let port = parsed.port().unwrap_or(default_port);
-                        let path_segments: Vec<&str> =
-                            parsed.path_segments().map(|c| c.collect()).unwrap_or_default();
+                        let path_segments: Vec<&str> = parsed
+                            .path_segments()
+                            .map(|c| c.collect())
+                            .unwrap_or_default();
 
                         if path_segments.len() >= 2 {
                             let raw_id = path_segments[0];
@@ -341,11 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 session_id = raw_id.to_string();
                                 role = path_segments[1].chars().next().unwrap_or('r');
 
-                                let scheme = if is_local {
-                                    "ws"
-                                } else {
-                                    "wss"
-                                };
+                                let scheme = if is_local { "ws" } else { "wss" };
                                 server_url = format!("{}://{}:{}", scheme, host, port);
                             }
                         }
@@ -433,11 +436,10 @@ impl App {
 
         let url = url::Url::parse(&self.config.server_url).ok()?;
         let host = url.host_str()?;
-        let port = url.port_or_known_default().unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
-        let uri = format!(
-            "blindwire://{}:{}/{}/r",
-            host, port, self.config.session_id
-        );
+        let port = url
+            .port_or_known_default()
+            .unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
+        let uri = format!("blindwire://{}:{}/{}/r", host, port, self.config.session_id);
 
         let qr = QrCode::encode_text(&uri, QrCodeEcc::Low).ok()?;
         let mut lines = Vec::new();
@@ -484,72 +486,71 @@ impl App {
             let is_tls = url.scheme() == "wss";
 
             loop {
-                let port = url.port_or_known_default().unwrap_or(if is_tls { 443 } else { 80 });
+                let port = url
+                    .port_or_known_default()
+                    .unwrap_or(if is_tls { 443 } else { 80 });
                 let pin_key = format!("{}://{}:{}", url.scheme(), host, port);
 
                 let connector = if is_tls {
-                    let mut config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                        .with_safe_default_protocol_versions()
-                        .unwrap()
-                        .dangerous()
-                        .with_custom_certificate_verifier(Arc::new(Pinner {
-                            pin_key: pin_key.clone(),
-                            store: store.clone(),
-                            event_tx: etx.clone(),
-                        }))
-                        .with_no_client_auth();
-                    
+                    let mut config = ClientConfig::builder_with_provider(Arc::new(
+                        rustls::crypto::ring::default_provider(),
+                    ))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(Pinner {
+                        pin_key: pin_key.clone(),
+                        store: store.clone(),
+                        event_tx: etx.clone(),
+                    }))
+                    .with_no_client_auth();
+
                     config.alpn_protocols = vec![b"http/1.1".to_vec()];
                     Some(Connector::Rustls(Arc::new(config)))
                 } else {
                     None
                 };
 
-                let stream_res = tokio::net::TcpStream::connect(format!(
-                    "{}:{}",
-                    url.host_str().unwrap(),
-                    port
-                ))
-                .await;
+                let stream_res =
+                    tokio::net::TcpStream::connect(format!("{}:{}", url.host_str().unwrap(), port))
+                        .await;
 
                 if let Ok(stream) = stream_res {
-                    let ws_res = client_async_tls_with_config(
-                        &server_url,
-                        stream,
-                        None,
-                        connector,
-                    )
-                    .await;
+                    let ws_res =
+                        client_async_tls_with_config(&server_url, stream, None, connector).await;
 
                     if let Ok((mut ws_stream, _)) = ws_res {
                         // Send JOIN
                         let role_byte = if role == 'i' { 0x69u8 } else { 0x72u8 };
                         let version_byte = 0x02u8; // Protocol v2.0
-                        
+
                         // Fix C: Strict session ID validation - must be exactly 32 bytes
                         let decoded_id = match URL_SAFE_NO_PAD.decode(&session_id) {
                             Ok(bytes) if bytes.len() == 32 => bytes,
                             Ok(bytes) => {
-                                let _ = etx.send(AppEvent::SecurityViolation(format!(
-                                    "FATAL: Session ID must be exactly 32 bytes, got {}",
-                                    bytes.len()
-                                ))).await;
+                                let _ = etx
+                                    .send(AppEvent::SecurityViolation(format!(
+                                        "FATAL: Session ID must be exactly 32 bytes, got {}",
+                                        bytes.len()
+                                    )))
+                                    .await;
                                 continue; // Terminal error, retry loop
                             }
                             Err(_) => {
-                                let _ = etx.send(AppEvent::SecurityViolation(
-                                    "FATAL: Session ID is not valid base64url".to_string()
-                                )).await;
+                                let _ = etx
+                                    .send(AppEvent::SecurityViolation(
+                                        "FATAL: Session ID is not valid base64url".to_string(),
+                                    ))
+                                    .await;
                                 continue; // Terminal error, retry loop
                             }
                         };
-                        
+
                         let mut id_32 = [0u8; 32];
                         id_32.copy_from_slice(&decoded_id);
-                        
+
                         let mut join_packet = vec![Opcode::Join as u8, role_byte, version_byte];
                         join_packet.extend_from_slice(&id_32);
-
 
                         if ws_stream.send(Message::Binary(join_packet)).await.is_ok() {
                             let _ = etx.send(AppEvent::Connected).await;
@@ -605,7 +606,7 @@ impl App {
                                 KeyCode::Enter => {
                                     if !self.input.is_empty() {
                                         let text = std::mem::take(&mut self.input);
-                                        
+
                                         // Fix A: Handle /confirm command for interactive TOFU
                                         if text.trim() == "/confirm" {
                                             self.log.push("Certificate confirmation noted.".to_string());
@@ -615,7 +616,7 @@ impl App {
                                             // next connection attempt will promote it to permanent
                                             continue;
                                         }
-                                        
+
                                         if self.session.state() == SessionState::Active {
                                             match self.session.send_message(&text) {
                                                 Ok(frame) => {
@@ -685,13 +686,22 @@ impl App {
             AppEvent::PinPending { host, fingerprint } => {
                 // Fix A: Interactive TOFU - show fingerprint and request confirmation
                 self.status = "CERTIFICATE CONFIRMATION REQUIRED".to_string();
-                self.log.push("═══════════════════════════════════════════════════════════════".to_string());
+                self.log.push(
+                    "═══════════════════════════════════════════════════════════════".to_string(),
+                );
                 self.log.push(format!("NEW CERTIFICATE for: {}", host));
-                self.log.push(format!("Fingerprint (SHA256): {}", fingerprint));
-                self.log.push("───────────────────────────────────────────────────────────────".to_string());
-                self.log.push("VERIFY THIS FINGERPRINT OUT-OF-BAND before accepting!".to_string());
-                self.log.push("Type /confirm to trust this certificate, or ESC to abort.".to_string());
-                self.log.push("═══════════════════════════════════════════════════════════════".to_string());
+                self.log
+                    .push(format!("Fingerprint (SHA256): {}", fingerprint));
+                self.log.push(
+                    "───────────────────────────────────────────────────────────────".to_string(),
+                );
+                self.log
+                    .push("VERIFY THIS FINGERPRINT OUT-OF-BAND before accepting!".to_string());
+                self.log
+                    .push("Type /confirm to trust this certificate, or ESC to abort.".to_string());
+                self.log.push(
+                    "═══════════════════════════════════════════════════════════════".to_string(),
+                );
             }
             AppEvent::MessageReceived(data) => {
                 if data.is_empty() {
@@ -785,7 +795,10 @@ impl App {
                                 return Err(Box::new(ProtocolError::RateLimitExceeded));
                             }
                             Ok(ErrorCode::RoleTaken) => {
-                                self.log.push("Server Error: Role taken (session already has this peer)".to_string());
+                                self.log.push(
+                                    "Server Error: Role taken (session already has this peer)"
+                                        .to_string(),
+                                );
                                 self.session.terminate();
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
@@ -795,7 +808,8 @@ impl App {
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
                             Err(_) => {
-                                self.log.push(format!("Server Error: Unknown code 0x{:02x}", code));
+                                self.log
+                                    .push(format!("Server Error: Unknown code 0x{:02x}", code));
                                 self.session.terminate();
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
@@ -866,7 +880,7 @@ mod tests {
         assert_eq!(parsed.scheme(), "blindwire");
         assert_eq!(parsed.host_str(), Some("relay.example.com"));
         assert_eq!(parsed.port(), Some(8080));
-        
+
         let path_segments: Vec<&str> = parsed.path_segments().unwrap().collect();
         assert_eq!(path_segments[0], "ABCD123");
         assert_eq!(path_segments[1], "i");
@@ -890,27 +904,34 @@ mod tests {
             last_draw: Instant::now(),
             qr_code: None,
         };
-        
+
         let qr = app.generate_qr();
         assert!(qr.is_some());
         let qr_lines = qr.unwrap();
         assert!(!qr_lines.is_empty());
         // Verify it contains ASCII block characters
-        assert!(qr_lines[0].contains('█') || qr_lines[0].contains('▀') || qr_lines[0].contains('▄') || qr_lines[0].contains(' '));
+        assert!(
+            qr_lines[0].contains('█')
+                || qr_lines[0].contains('▀')
+                || qr_lines[0].contains('▄')
+                || qr_lines[0].contains(' ')
+        );
     }
 
     #[tokio::test]
     async fn test_pin_store_load_save() {
         let temp_dir = tempfile::tempdir().expect("tempdir failed");
         let pins_path = temp_dir.path().join("pins.json");
-        
+
         // Mock path
         let mut store = PinStore::default();
-        store.pins.insert("wss://test.com:443".to_string(), "hash1".to_string());
-        
+        store
+            .pins
+            .insert("wss://test.com:443".to_string(), "hash1".to_string());
+
         let data = serde_json::to_string_pretty(&store).unwrap();
         fs::write(&pins_path, data).unwrap();
-        
+
         // Load (manual load for testing)
         let data_read = fs::read_to_string(&pins_path).unwrap();
         let loaded: PinStore = serde_json::from_str(&data_read).unwrap();
@@ -921,7 +942,7 @@ mod tests {
     async fn test_pinner_tofu_and_lock() {
         let (etx, _erx) = tokio::sync::mpsc::channel(32);
         let store = Arc::new(std::sync::Mutex::new(PinStore::default()));
-        
+
         let pinner = Pinner {
             pin_key: "wss://test.com:443".to_string(),
             store: store.clone(),
@@ -940,7 +961,7 @@ mod tests {
             UnixTime::now(),
         );
         assert!(res.is_err()); // First encounter MUST reject
-        
+
         {
             let s = store.lock().unwrap();
             assert!(s.pending_pins.get("wss://test.com:443").is_some());
@@ -956,7 +977,7 @@ mod tests {
             UnixTime::now(),
         );
         assert!(res.is_ok()); // Pending becomes permanent
-        
+
         {
             let s = store.lock().unwrap();
             assert!(s.pins.get("wss://test.com:443").is_some());
@@ -988,7 +1009,7 @@ mod tests {
     async fn test_pinner_scoping() {
         let (etx, _erx) = tokio::sync::mpsc::channel(32);
         let store = Arc::new(std::sync::Mutex::new(PinStore::default()));
-        
+
         let cert1 = CertificateDer::from(vec![1, 2, 3]);
         let cert2 = CertificateDer::from(vec![4, 5, 6]);
 
@@ -1006,16 +1027,64 @@ mod tests {
         };
 
         // Pin Key A to Cert 1 (two calls: first rejects, second promotes)
-        assert!(pinner_a.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
-        assert!(pinner_a.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_ok());
-        
+        assert!(pinner_a
+            .verify_server_cert(
+                &cert1,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_err());
+        assert!(pinner_a
+            .verify_server_cert(
+                &cert1,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_ok());
+
         // Key B should still be empty and allow Cert 2 (two calls: first rejects, second promotes)
-        assert!(pinner_b.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
-        assert!(pinner_b.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_ok());
+        assert!(pinner_b
+            .verify_server_cert(
+                &cert2,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_err());
+        assert!(pinner_b
+            .verify_server_cert(
+                &cert2,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_ok());
 
         // Now both are locked
-        assert!(pinner_a.verify_server_cert(&cert2, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
-        assert!(pinner_b.verify_server_cert(&cert1, &[], &ServerName::try_from("host1").unwrap(), &[], UnixTime::now()).is_err());
+        assert!(pinner_a
+            .verify_server_cert(
+                &cert2,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_err());
+        assert!(pinner_b
+            .verify_server_cert(
+                &cert1,
+                &[],
+                &ServerName::try_from("host1").unwrap(),
+                &[],
+                UnixTime::now()
+            )
+            .is_err());
     }
 }
 
@@ -1023,12 +1092,12 @@ fn sanitize_text(text: &str) -> String {
     text.chars()
         .filter(|c| {
             let val = *c as u32;
-            
+
             // 1. Safe ASCII Whitelist:
             // - Printable ASCII: [0x20, 0x7E]
             // - Horizontal Tab: 0x09
             // - Line Feed: 0x0A
-            if (val >= 0x20 && val <= 0x7E) || *c == '\n' || *c == '\t' {
+            if (0x20..=0x7E).contains(&val) || *c == '\n' || *c == '\t' {
                 return true;
             }
 
@@ -1036,11 +1105,13 @@ fn sanitize_text(text: &str) -> String {
             // - C1 Control: [0x80, 0x9F]
             // - Bidi Control: [0x202A, 0x202E], [0x2066, 0x2069], 0x200E, 0x200F
             // - Joiners/Hide: [0x200B, 0x200D]
-            if (val >= 0x80 && val <= 0x9F) ||
-               (val >= 0x202A && val <= 0x202E) ||
-               (val >= 0x2066 && val <= 0x2069) ||
-               (val >= 0x200B && val <= 0x200D) ||
-               *c == '\u{200E}' || *c == '\u{200F}' {
+            if (0x80..=0x9F).contains(&val)
+                || (0x202A..=0x202E).contains(&val)
+                || (0x2066..=0x2069).contains(&val)
+                || (0x200B..=0x200D).contains(&val)
+                || *c == '\u{200E}'
+                || *c == '\u{200F}'
+            {
                 return false;
             }
 

@@ -48,14 +48,23 @@ impl fmt::Display for InviteError {
         match self {
             Self::InvalidUriFormat => write!(f, "Invalid URI format"),
             Self::MissingRequiredField(k) => write!(f, "Missing required field: {}", k),
-            Self::UnknownOrDuplicateField(k) => write!(f, "Unknown or duplicate query field: {}", k),
+            Self::UnknownOrDuplicateField(k) => {
+                write!(f, "Unknown or duplicate query field: {}", k)
+            }
             Self::InvalidVersion => write!(f, "Invalid or unsupported version (must be v=1)"),
             Self::OversizedField(k) => write!(f, "Field exceeds max length bounds: {}", k),
             Self::InvalidRelayUrl => write!(f, "Relay URL is invalid or not wss://"),
             Self::ExpiredToken => write!(f, "Invite token has expired"),
             Self::CustomRelayRequiresPin => write!(f, "Custom relays require a pinning hash (p=)"),
-            Self::OfficialRelayMustNotHavePin => write!(f, "Official relay must not include an inline pin (prevents injection)"),
-            Self::InvalidEncoding(k) => write!(f, "Field contains invalid characters (must be base64url no-padding): {}", k),
+            Self::OfficialRelayMustNotHavePin => write!(
+                f,
+                "Official relay must not include an inline pin (prevents injection)"
+            ),
+            Self::InvalidEncoding(k) => write!(
+                f,
+                "Field contains invalid characters (must be base64url no-padding): {}",
+                k
+            ),
         }
     }
 }
@@ -133,14 +142,16 @@ impl InvitePayload {
         if exp_str.len() < 10 || exp_str.len() > 13 {
             return Err(InviteError::OversizedField("e"));
         }
-        let exp = exp_str.parse::<u64>().map_err(|_| InviteError::InvalidEncoding("e"))?;
+        let exp = exp_str
+            .parse::<u64>()
+            .map_err(|_| InviteError::InvalidEncoding("e"))?;
 
         // 3. Expiry validation (with 5 minute tolerance for local clock skew)
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        
+
         let skew_ms = 5 * 60 * 1000;
         if now > exp + skew_ms {
             return Err(InviteError::ExpiredToken);
@@ -151,20 +162,20 @@ impl InvitePayload {
         if relay_url_str.len() > 256 {
             return Err(InviteError::OversizedField("u"));
         }
-        
+
         let relay_url = Url::parse(&relay_url_str).map_err(|_| InviteError::InvalidRelayUrl)?;
         if relay_url.scheme() != "wss" {
             let host = relay_url.host_str().unwrap_or("");
             let is_local = host == "localhost" || host == "127.0.0.1";
-            
+
             // Allow plain ws:// ONLY in debug builds for local testing
             let allow_insecure = cfg!(debug_assertions) && is_local;
-            
+
             if !allow_insecure {
                 return Err(InviteError::InvalidRelayUrl);
             }
         }
-        
+
         // Strip trailing slash for exact matches
         let is_official = matches_official_relay(&relay_url);
 
@@ -244,7 +255,9 @@ impl TokenState {
 }
 
 fn is_base64url_unpadded(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && !s.ends_with('=')
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !s.ends_with('=')
 }
 
 fn matches_official_relay(url: &Url) -> bool {
@@ -262,18 +275,22 @@ mod tests {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis() as u64 + 10_000_000
+            .as_millis() as u64
+            + 10_000_000
     }
 
     fn base_valid_uri() -> String {
-        format!("blindwire://join?v=1&r=room123&t=token1234567890123&e={}", get_valid_exp())
+        format!(
+            "blindwire://join?v=1&r=room123&t=token1234567890123&e={}",
+            get_valid_exp()
+        )
     }
 
     #[test]
     fn test_valid_official_payload() {
         let uri = base_valid_uri();
         let payload = InvitePayload::parse(&uri).unwrap();
-        
+
         assert_eq!(payload.room, "room123");
         assert_eq!(payload.relay_pin, None);
         assert_eq!(payload.relay_url.as_str(), "wss://relay.blindwire.io/");
@@ -281,7 +298,10 @@ mod tests {
 
     #[test]
     fn test_deeplink_rejects_invalid_version() {
-        let uri = format!("blindwire://join?v=2&r=room123&t=token1234567890123&e={}", get_valid_exp());
+        let uri = format!(
+            "blindwire://join?v=2&r=room123&t=token1234567890123&e={}",
+            get_valid_exp()
+        );
         assert_eq!(InvitePayload::parse(&uri), Err(InviteError::InvalidVersion));
     }
 
@@ -289,19 +309,36 @@ mod tests {
     fn test_deeplink_rejects_oversized_payload() {
         // Exceed room 64 chars
         let big_room = "A".repeat(65);
-        let uri = format!("blindwire://join?v=1&r={}&t=token1234567890123&e={}", big_room, get_valid_exp());
-        assert_eq!(InvitePayload::parse(&uri), Err(InviteError::OversizedField("r")));
+        let uri = format!(
+            "blindwire://join?v=1&r={}&t=token1234567890123&e={}",
+            big_room,
+            get_valid_exp()
+        );
+        assert_eq!(
+            InvitePayload::parse(&uri),
+            Err(InviteError::OversizedField("r"))
+        );
 
         // Exceed token 128 chars
         let big_token = "B".repeat(129);
-        let uri = format!("blindwire://join?v=1&r=room1&t={}&e={}", big_token, get_valid_exp());
-        assert_eq!(InvitePayload::parse(&uri), Err(InviteError::OversizedField("t")));
+        let uri = format!(
+            "blindwire://join?v=1&r=room1&t={}&e={}",
+            big_token,
+            get_valid_exp()
+        );
+        assert_eq!(
+            InvitePayload::parse(&uri),
+            Err(InviteError::OversizedField("t"))
+        );
     }
 
     #[test]
     fn test_duplicate_query_key_rejected() {
         let uri = format!("{}&t=evil", base_valid_uri());
-        assert_eq!(InvitePayload::parse(&uri), Err(InviteError::UnknownOrDuplicateField("t".to_string())));
+        assert_eq!(
+            InvitePayload::parse(&uri),
+            Err(InviteError::UnknownOrDuplicateField("t".to_string()))
+        );
     }
 
     #[test]
@@ -310,8 +347,12 @@ mod tests {
         let past_exp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis() as u64 - (10 * 60 * 1000);
-        let uri = format!("blindwire://join?v=1&r=room1&t=token1234567890123&e={}", past_exp);
+            .as_millis() as u64
+            - (10 * 60 * 1000);
+        let uri = format!(
+            "blindwire://join?v=1&r=room1&t=token1234567890123&e={}",
+            past_exp
+        );
         assert_eq!(InvitePayload::parse(&uri), Err(InviteError::ExpiredToken));
     }
 
@@ -319,7 +360,10 @@ mod tests {
     fn test_custom_relay_requires_pin_or_tofu_path() {
         // Missing pin
         let uri = format!("{}&u=wss://custom.net", base_valid_uri());
-        assert_eq!(InvitePayload::parse(&uri), Err(InviteError::CustomRelayRequiresPin));
+        assert_eq!(
+            InvitePayload::parse(&uri),
+            Err(InviteError::CustomRelayRequiresPin)
+        );
 
         // Valid pin format (43 chars base64url)
         let valid_pin = "A".repeat(43);
@@ -332,11 +376,21 @@ mod tests {
     fn test_official_relay_rejects_inline_pin_field() {
         // Injecting a pin for the implicit official relay
         let uri = format!("{}&p={}", base_valid_uri(), "A".repeat(43));
-        assert_eq!(InvitePayload::parse(&uri), Err(InviteError::OfficialRelayMustNotHavePin));
+        assert_eq!(
+            InvitePayload::parse(&uri),
+            Err(InviteError::OfficialRelayMustNotHavePin)
+        );
 
         // Injecting a pin for the explicit official relay
-        let uri_explicit = format!("{}&u=wss://relay.blindwire.io&p={}", base_valid_uri(), "A".repeat(43));
-        assert_eq!(InvitePayload::parse(&uri_explicit), Err(InviteError::OfficialRelayMustNotHavePin));
+        let uri_explicit = format!(
+            "{}&u=wss://relay.blindwire.io&p={}",
+            base_valid_uri(),
+            "A".repeat(43)
+        );
+        assert_eq!(
+            InvitePayload::parse(&uri_explicit),
+            Err(InviteError::OfficialRelayMustNotHavePin)
+        );
     }
 
     #[test]
@@ -347,7 +401,7 @@ mod tests {
         assert_eq!(state, TokenState::Pending);
         // Second click while pending fails
         assert!(state.try_use().is_err());
-        
+
         // Success -> Consumed
         state.mark_consumed();
         assert_eq!(state, TokenState::Consumed);
@@ -359,10 +413,10 @@ mod tests {
         let mut state = TokenState::Fresh;
         // First click
         state.try_use().unwrap();
-        
+
         // Transient network failure occurs...
         state.reset_on_transient_failure();
-        
+
         assert_eq!(state, TokenState::Fresh);
         // Can try again safely
         assert!(state.try_use().is_ok());

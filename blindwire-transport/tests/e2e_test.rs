@@ -39,8 +39,8 @@ async fn test_full_session_e2e() {
         if let Ok((ref mut s, Some(token))) = session_res {
             tx.send(token).expect("send token");
             if let Err(e) = s.handshake().await {
-                 println!("Initiator handshake failed: {:?}", e);
-                 return Err(e);
+                println!("Initiator handshake failed: {:?}", e);
+                return Err(e);
             }
         } else {
             tx.send([0u8; 32]).unwrap();
@@ -53,13 +53,14 @@ async fn test_full_session_e2e() {
     // Spawn responder - this triggers PEER_JOINED to initiator
     let responder_handle = tokio::spawn(async move {
         println!("Responder connecting...");
-        let config = TransportConfig::responder(responder_url, session_id, token).with_insecure_dev();
+        let config =
+            TransportConfig::responder(responder_url, session_id, token).with_insecure_dev();
         let mut session_res = SecureSession::connect(config).await;
         if let Ok((ref mut s, _)) = session_res {
-             if let Err(e) = s.handshake().await {
-                 println!("Responder handshake failed: {:?}", e);
-                 return Err(e);
-             }
+            if let Err(e) = s.handshake().await {
+                println!("Responder handshake failed: {:?}", e);
+                return Err(e);
+            }
         }
         session_res
     });
@@ -144,7 +145,7 @@ async fn test_rate_limiting() {
     let mut session_id_bg = session_id;
     session_id_bg[0] = 99;
     let config = TransportConfig::initiator(url.clone(), session_id_bg).with_insecure_dev();
-    
+
     // Attempt 6th connection
     let res = tokio::time::timeout(Duration::from_secs(5), SecureSession::connect(config)).await;
 
@@ -152,7 +153,10 @@ async fn test_rate_limiting() {
         Ok(Err(TransportError::RateLimitExceeded)) => {
             println!("[TEST] SUCCESS: Correctly received RateLimitExceeded on 6th connection");
         }
-        Ok(res) => panic!("[TEST] FAILURE: Expected RateLimitExceeded on 6th connection, got {:?}", res),
+        Ok(res) => panic!(
+            "[TEST] FAILURE: Expected RateLimitExceeded on 6th connection, got {:?}",
+            res
+        ),
         Err(_) => panic!("[TEST] FAILURE: Timeout waiting for RateLimitExceeded on 6th connection"),
     }
 
@@ -176,11 +180,11 @@ async fn test_rate_limiting() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         // The server limit is 5 conns, so we must drop some as we go to keep making connections
         if (i + 1) % 4 == 0 {
-             // Abort some handles to free up slots
-             if let Some(bh) = burst_handles.pop() {
-                 bh.abort();
-             }
-             tokio::time::sleep(Duration::from_millis(100)).await;
+            // Abort some handles to free up slots
+            if let Some(bh) = burst_handles.pop() {
+                bh.abort();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -191,7 +195,10 @@ async fn test_rate_limiting() {
         Ok(Err(TransportError::RateLimitExceeded)) => {
             println!("Correctly received RateLimitExceeded on 11th JOIN attempt");
         }
-        Ok(res) => panic!("Expected RateLimitExceeded on 11th JOIN attempt, got {:?}", res),
+        Ok(res) => panic!(
+            "Expected RateLimitExceeded on 11th JOIN attempt, got {:?}",
+            res
+        ),
         Err(_) => panic!("Timeout waiting for RateLimitExceeded on 11th JOIN"),
     }
 

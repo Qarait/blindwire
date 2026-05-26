@@ -24,10 +24,10 @@
 
 pub mod error;
 pub mod frame;
-pub mod noise;
-pub mod sas;
 /// Deep link and QR invite payload validation.
 pub mod invite;
+pub mod noise;
+pub mod sas;
 pub mod state;
 
 pub use error::ProtocolError;

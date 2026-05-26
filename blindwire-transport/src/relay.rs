@@ -9,17 +9,17 @@
 //! - Each `send_frame()` = exactly one `ws.send(Binary(...))`
 //! - Each `recv_frame()` = exactly one `ws.next()` → parse → Frame
 
-use blindwire_core::frame::Frame;
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    connect_async_tls_with_config, Connector,
-    tungstenite::protocol::Message as WsMessage, MaybeTlsStream, WebSocketStream,
-};
 use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::pinning::{BlindWireVerifier, DiskPinStore};
+use blindwire_core::frame::Frame;
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::protocol::Message as WsMessage, Connector,
+    MaybeTlsStream, WebSocketStream,
+};
 
 /// Signaling opcodes (Client → Server).
 mod opcode {
@@ -75,11 +75,12 @@ impl RelayTransport {
         });
         let store = Arc::new(DiskPinStore::new(pins_path));
 
-        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(BlindWireVerifier::new("blindwire.io", store));
+        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+            Arc::new(BlindWireVerifier::new("blindwire.io", store));
 
-        let config_tls = rustls::ClientConfig::builder_with_provider(
-            Arc::new(rustls::crypto::ring::default_provider().into())
-        )
+        let config_tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
         .with_safe_default_protocol_versions()
         .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?
         .dangerous()
@@ -123,7 +124,9 @@ impl RelayTransport {
                 let code = data[1];
                 match code {
                     server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
-                    server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                    server_opcode::RATE_LIMIT_EXCEEDED => {
+                        return Err(TransportError::RateLimitExceeded)
+                    }
                     _ => return Err(TransportError::UnexpectedResponse(code)),
                 }
             } else {
@@ -149,8 +152,12 @@ impl RelayTransport {
                 server_opcode::ERROR => {
                     let code = msg.get(1).copied().unwrap_or(0);
                     match code {
-                        server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
-                        server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                        server_opcode::VERSION_MISMATCH => {
+                            return Err(TransportError::VersionMismatch)
+                        }
+                        server_opcode::RATE_LIMIT_EXCEEDED => {
+                            return Err(TransportError::RateLimitExceeded)
+                        }
                         _ => return Err(TransportError::UnexpectedResponse(code)),
                     }
                 }
@@ -216,8 +223,12 @@ impl RelayTransport {
                 server_opcode::ERROR => {
                     let code = msg.get(1).copied().unwrap_or(0);
                     match code {
-                        server_opcode::VERSION_MISMATCH => return Err(TransportError::VersionMismatch),
-                        server_opcode::RATE_LIMIT_EXCEEDED => return Err(TransportError::RateLimitExceeded),
+                        server_opcode::VERSION_MISMATCH => {
+                            return Err(TransportError::VersionMismatch)
+                        }
+                        server_opcode::RATE_LIMIT_EXCEEDED => {
+                            return Err(TransportError::RateLimitExceeded)
+                        }
                         _ => return Err(TransportError::UnexpectedResponse(code)),
                     }
                 }

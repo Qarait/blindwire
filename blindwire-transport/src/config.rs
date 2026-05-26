@@ -53,7 +53,11 @@ impl TransportConfig {
     }
 
     /// Create a new configuration for a responder.
-    pub fn responder(signaling_url: impl Into<String>, session_id: [u8; 32], token: [u8; 32]) -> Self {
+    pub fn responder(
+        signaling_url: impl Into<String>,
+        session_id: [u8; 32],
+        token: [u8; 32],
+    ) -> Self {
         Self {
             signaling_url: signaling_url.into(),
             session_id,

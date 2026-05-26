@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +12,6 @@ use tokio::time::Instant;
 use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use rand::RngCore;
 
 // Constants from spec
 const SESSION_TTL: Duration = Duration::from_secs(3600); // 1 hour
@@ -58,6 +58,7 @@ enum Opcode {
 /// Fix D: Error codes for ERROR(0x05) payload
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ErrorCode {
     RoleTaken = 0x01,
     InvalidFormat = 0x02,
@@ -166,7 +167,12 @@ pub async fn run_server(listener: TcpListener) {
                     // Global limit check
                     if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
                         total_conns.fetch_sub(1, Ordering::SeqCst);
-                        let _ = ws.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8])).await;
+                        let _ = ws
+                            .send(Message::Binary(vec![
+                                Opcode::Error as u8,
+                                ErrorCode::RateLimitExceeded as u8,
+                            ]))
+                            .await;
                         return;
                     }
 
@@ -174,7 +180,12 @@ pub async fn run_server(listener: TcpListener) {
                     {
                         let mut entry = ip_conns.entry(ip).or_insert(0);
                         if *entry >= MAX_CONN_PER_IP {
-                            let _ = ws.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8])).await;
+                            let _ = ws
+                                .send(Message::Binary(vec![
+                                    Opcode::Error as u8,
+                                    ErrorCode::RateLimitExceeded as u8,
+                                ]))
+                                .await;
                             total_conns.fetch_sub(1, Ordering::SeqCst);
                             return;
                         }
@@ -185,7 +196,11 @@ pub async fn run_server(listener: TcpListener) {
                     let _ = handle_connection_ws(ws, sessions, ip, ip_bursts).await;
 
                     // Cleanup
-                    ip_conns.entry(ip).and_modify(|c| { if *c > 0 { *c -= 1 } });
+                    ip_conns.entry(ip).and_modify(|c| {
+                        if *c > 0 {
+                            *c -= 1
+                        }
+                    });
                     total_conns.fetch_sub(1, Ordering::SeqCst);
                 }
                 Err(_e) => {
@@ -212,11 +227,14 @@ async fn handle_connection_ws(
         // Burst check
         {
             let now = Instant::now();
-            let mut bursts = ip_bursts.entry(ip).or_insert(Vec::new());
+            let mut bursts = ip_bursts.entry(ip).or_default();
             bursts.retain(|&t| now.duration_since(t) < Duration::from_secs(60));
             if bursts.len() >= 10 {
                 let _ = ws_tx
-                    .send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::RateLimitExceeded as u8]))
+                    .send(Message::Binary(vec![
+                        Opcode::Error as u8,
+                        ErrorCode::RateLimitExceeded as u8,
+                    ]))
                     .await;
                 return Ok(());
             }
@@ -236,7 +254,10 @@ async fn handle_connection_ws(
 
         if version_byte != 0x02 {
             let _ = ws_tx
-                .send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::VersionMismatch as u8]))
+                .send(Message::Binary(vec![
+                    Opcode::Error as u8,
+                    ErrorCode::VersionMismatch as u8,
+                ]))
                 .await;
             return Ok(());
         }
@@ -255,7 +276,12 @@ async fn handle_connection_ws(
         if role_byte == 0x72 {
             // Responder must provide token: [opcode:1][role:1][version:1][session_id:32][token:32]
             if data.len() != 67 {
-                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8])).await;
+                let _ = ws_tx
+                    .send(Message::Binary(vec![
+                        Opcode::Error as u8,
+                        ErrorCode::InvalidFormat as u8,
+                    ]))
+                    .await;
                 return Ok(());
             }
             let mut t = [0u8; 32];
@@ -265,18 +291,33 @@ async fn handle_connection_ws(
             // Validate token
             if let Some(mut session) = sessions.get_mut(&session_id) {
                 if session.token_consumed || session.token != Some(join_token) {
-                     let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::Unauthorized as u8])).await;
-                     return Ok(());
+                    let _ = ws_tx
+                        .send(Message::Binary(vec![
+                            Opcode::Error as u8,
+                            ErrorCode::Unauthorized as u8,
+                        ]))
+                        .await;
+                    return Ok(());
                 }
                 // Check expiry (using same TTL as session for simplicity, but server-side)
                 if Instant::now().duration_since(session.created_at) > get_session_ttl() {
-                     let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::Expired as u8])).await;
-                     return Ok(());
+                    let _ = ws_tx
+                        .send(Message::Binary(vec![
+                            Opcode::Error as u8,
+                            ErrorCode::Expired as u8,
+                        ]))
+                        .await;
+                    return Ok(());
                 }
                 session.token_consumed = true;
             } else {
                 // Room doesn't exist
-                let _ = ws_tx.send(Message::Binary(vec![Opcode::Error as u8, ErrorCode::Unauthorized as u8])).await;
+                let _ = ws_tx
+                    .send(Message::Binary(vec![
+                        Opcode::Error as u8,
+                        ErrorCode::Unauthorized as u8,
+                    ]))
+                    .await;
                 return Ok(());
             }
         }
@@ -285,7 +326,11 @@ async fn handle_connection_ws(
     }
 
     let role = if role_byte == 0x69 { 'i' } else { 'r' };
-    log::info!("[SERVER] Processing JOIN: role={}, session={}", role, &session_id[..8]); // Truncated ID for privacy
+    log::info!(
+        "[SERVER] Processing JOIN: role={}, session={}",
+        role,
+        &session_id[..8]
+    ); // Truncated ID for privacy
 
     // Register in session map
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
@@ -324,7 +369,7 @@ async fn handle_connection_ws(
             let mut token = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut token);
             session.token = Some(token);
-            
+
             // Send token to Initiator: [0x06][token:32]
             let mut token_pkt = Vec::with_capacity(33);
             token_pkt.push(Opcode::Token as u8);

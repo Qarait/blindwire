@@ -1,10 +1,10 @@
+pub mod commands;
 pub mod error;
 pub mod state;
-pub mod commands;
 pub mod tests;
 
 use state::AppState;
-use tauri::{Manager, Listener, Emitter};
+use tauri::{Emitter, Listener, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,15 +30,15 @@ pub fn run() {
             // Register deep link handler directly in Tauri setup
             // Wait: tauri_plugin_deep_link handles registering the OS URI scheme.
             // When a blindwire:// link is opened, we either queue it or emit to UI.
-            
+
             let handle = app.handle().clone();
-            
+
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             {
                 // Note: Actual API for tauri-plugin-deep-link v2 might vary, typically:
                 // `app.deep_link().on_open(...)`
                 // I will add a placeholder for deep link event handling that safely queues using app state.
-                
+
                 app.listen("deep-link://new-url", move |event: tauri::Event| {
                     let uri = event.payload();
                     let state = handle.state::<AppState>();

@@ -62,7 +62,9 @@ impl SecureSession {
     /// 4. Full Noise_XX handshake
     ///
     /// Returns error if any step fails.
-    pub async fn connect(config: TransportConfig) -> Result<(Self, Option<[u8; 32]>), TransportError> {
+    pub async fn connect(
+        config: TransportConfig,
+    ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
         // Validate URL scheme
         if !config.insecure_dev && !config.signaling_url.starts_with("wss://") {
             return Err(TransportError::ConnectionFailed(
@@ -71,8 +73,7 @@ impl SecureSession {
         }
 
         // Connect to signaling server
-        let (relay, token) =
-            RelayTransport::connect(&config).await?;
+        let (relay, token) = RelayTransport::connect(&config).await?;
 
         // Create protocol session
         let mut inner = match config.role {
@@ -83,12 +84,15 @@ impl SecureSession {
         // Mark as connected
         inner.on_connected()?;
 
-        Ok((Self {
-            config,
-            inner,
-            relay,
-            terminated: false,
-        }, token))
+        Ok((
+            Self {
+                config,
+                inner,
+                relay,
+                terminated: false,
+            },
+            token,
+        ))
     }
 
     /// Complete the connection by waiting for peer and performing handshake.

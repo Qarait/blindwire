@@ -1,14 +1,14 @@
-use serde::{Serialize, Deserialize};
-use sha2::{Digest, Sha256};
-use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{State, Emitter};
-use uuid::Uuid;
+use crate::error::AppError;
+use crate::state::AppState;
 use blindwire_core::invite::InvitePayload;
 use blindwire_core::sas;
 use blindwire_transport::{SecureSession, TransportConfig, TransportError};
-use crate::error::AppError;
-use crate::state::AppState;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, State};
+use uuid::Uuid;
 
 // ────────────────────────────────────────────
 // Response types (all safe to serialize to JS)
@@ -47,7 +47,10 @@ pub struct MessageAck {
 }
 
 pub enum SessionCmd {
-    SendText(String, tokio::sync::oneshot::Sender<Result<MessageAck, AppError>>),
+    SendText(
+        String,
+        tokio::sync::oneshot::Sender<Result<MessageAck, AppError>>,
+    ),
     Leave,
 }
 
@@ -74,7 +77,7 @@ fn now_ms() -> u64 {
 
 /// Generate a cryptographically random base64url string of `n` bytes.
 fn rand_base64url(n: usize) -> String {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut buf = vec![0u8; n];
     getrandom::getrandom(&mut buf).expect("getrandom failed");
     URL_SAFE_NO_PAD.encode(&buf)
@@ -82,6 +85,7 @@ fn rand_base64url(n: usize) -> String {
 
 /// Spawn the session task that multiplexes sending and receiving.
 /// Returns the JoinHandle so callers can abort it on session replacement.
+#[allow(clippy::too_many_arguments)]
 fn spawn_session_task(
     mut session: SecureSession,
     mut rx: tokio::sync::mpsc::Receiver<SessionCmd>,
@@ -89,7 +93,9 @@ fn spawn_session_task(
     clear_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     my_generation: u64,
     current_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    session_tx_slot: std::sync::Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<SessionCmd>>>>,
+    session_tx_slot: std::sync::Arc<
+        tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<SessionCmd>>>,
+    >,
     session_id: [u8; 32], // Pass session ID to emit verification state
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
@@ -178,7 +184,11 @@ fn spawn_session_task(
 /// After a successful handshake, emit the real verification state.
 /// Uses session.fingerprint() (16 hex chars) as the SAS shared_secret input,
 /// and the session_id bytes as the salt — matching the core sas::generate() contract.
-fn emit_verification_state(session: &SecureSession, session_id: &[u8; 32], app_handle: &tauri::AppHandle) {
+fn emit_verification_state(
+    session: &SecureSession,
+    session_id: &[u8; 32],
+    app_handle: &tauri::AppHandle,
+) {
     let fingerprint_hex = session.fingerprint().unwrap_or_default();
 
     // Decode the 16-char hex fingerprint into 8 bytes, zero-pad to [u8;32] for sas::generate.
@@ -197,11 +207,14 @@ fn emit_verification_state(session: &SecureSession, session_id: &[u8; 32], app_h
         verified: bool,
     }
 
-    let _ = app_handle.emit("verification_state_changed", VerificationState {
-        identicon_seed: fingerprint_hex,
-        emojis,
-        verified: false,
-    });
+    let _ = app_handle.emit(
+        "verification_state_changed",
+        VerificationState {
+            identicon_seed: fingerprint_hex,
+            emojis,
+            verified: false,
+        },
+    );
 }
 
 // ────────────────────────────────────────────
@@ -213,13 +226,17 @@ fn emit_verification_state(session: &SecureSession, session_id: &[u8; 32], app_h
 #[tauri::command]
 pub async fn parse_invite(
     uri: String,
-    state: State<'_, AppState>
+    state: State<'_, AppState>,
 ) -> Result<ParsedInviteSummary, AppError> {
     let payload = InvitePayload::parse(&uri).map_err(AppError::from)?;
 
     let is_custom_relay = payload.relay_pin.is_some();
     let relay_label = if is_custom_relay {
-        payload.relay_url.host_str().unwrap_or("Custom Server").to_string()
+        payload
+            .relay_url
+            .host_str()
+            .unwrap_or("Custom Server")
+            .to_string()
     } else {
         "Official BlindWire Relay".to_string()
     };
@@ -246,7 +263,11 @@ pub async fn create_room(
 ) -> Result<RoomInfo, AppError> {
     // 1. Reject if already in a session
     if state.has_active_session() {
-        return Err(AppError::new("SESSION_ACTIVE", "Please leave the current room first.", false));
+        return Err(AppError::new(
+            "SESSION_ACTIVE",
+            "Please leave the current room first.",
+            false,
+        ));
     }
 
     // 2. Increment generation, begin session
@@ -255,24 +276,28 @@ pub async fn create_room(
     // 3. Mint a random room ID (16 bytes → 22-char base64url)
     let room_id = rand_base64url(16);
     let session_id = session_id_from_room(&room_id);
-    
+
     log::info!("entering create_room");
 
     // Allow overriding the dev relay URL via env var for testing
     let relay_url = std::env::var("BLINDWIRE_RELAY_URL").unwrap_or_else(|_| {
         let fallback = "ws://127.0.0.1:8080".to_string();
-        log::warn!("BLINDWIRE_RELAY_URL is missing, using fallback: {}", fallback);
+        log::warn!(
+            "BLINDWIRE_RELAY_URL is missing, using fallback: {}",
+            fallback
+        );
         fallback
     });
     log::info!("exact relay URL being used: {}", relay_url);
 
     // 4. Connect as Initiator and await server-minted token
     let config = TransportConfig::initiator(relay_url.clone(), session_id).with_insecure_dev();
-    
+
     log::info!("before connect");
-    
+
     let connect_future = SecureSession::connect(config);
-    let connect_result = tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await;
+    let connect_result =
+        tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await;
 
     let (session, server_token) = match connect_result {
         Ok(Ok(success)) => {
@@ -285,10 +310,14 @@ pub async fn create_room(
         }
         Err(_) => {
             log::error!("connect failure: Timeout after 10s");
-            return Err(AppError::new("RELAY_UNREACHABLE", "Timeout connecting to relay server.", true));
+            return Err(AppError::new(
+                "RELAY_UNREACHABLE",
+                "Timeout connecting to relay server.",
+                true,
+            ));
         }
     };
-    
+
     let token_raw = match server_token {
         Some(t) => {
             log::info!("token mint success");
@@ -296,12 +325,16 @@ pub async fn create_room(
         }
         None => {
             log::error!("token mint failure");
-            return Err(AppError::new("PROTOCOL_ERROR", "Server did not mint an invitation token.", true));
+            return Err(AppError::new(
+                "PROTOCOL_ERROR",
+                "Server did not mint an invitation token.",
+                true,
+            ));
         }
     };
 
     // Encode token for the URI
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let token_b64 = URL_SAFE_NO_PAD.encode(token_raw);
 
     // 5. Build the canonical invite URI
@@ -325,7 +358,16 @@ pub async fn create_room(
         *guard = Some(tx);
     }
 
-    let handle = spawn_session_task(session, rx, app_handle, pv_arc, my_generation, gen_arc, session_tx_slot, sid);
+    let handle = spawn_session_task(
+        session,
+        rx,
+        app_handle,
+        pv_arc,
+        my_generation,
+        gen_arc,
+        session_tx_slot,
+        sid,
+    );
     if let Ok(mut h) = handle_slot.lock() {
         *h = Some(handle);
     }
@@ -347,19 +389,34 @@ pub async fn join_room(
 ) -> Result<(), AppError> {
     // 1. Reject if already in a session
     if state.has_active_session() {
-        return Err(AppError::new("SESSION_ACTIVE", "Please leave the current room first.", false));
+        return Err(AppError::new(
+            "SESSION_ACTIVE",
+            "Please leave the current room first.",
+            false,
+        ));
     }
 
     // 2. Consume the Rust-side invite payload — JS cannot forge this
-    let invite = state.consume_invite(&invite_handle)
-        .ok_or_else(|| AppError::new("INVITE_INVALID", "Invite handle is invalid, expired, or already used.", false))?;
+    let invite = state.consume_invite(&invite_handle).ok_or_else(|| {
+        AppError::new(
+            "INVITE_INVALID",
+            "Invite handle is invalid, expired, or already used.",
+            false,
+        )
+    })?;
 
     // 3. Extract token and decode from base64url
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut token_bytes = [0u8; 32];
-    let decoded = URL_SAFE_NO_PAD.decode(&invite.token).map_err(|_| AppError::new("INVITE_INVALID", "Malformed token encoding.", false))?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(&invite.token)
+        .map_err(|_| AppError::new("INVITE_INVALID", "Malformed token encoding.", false))?;
     if decoded.len() != 32 {
-        return Err(AppError::new("INVITE_INVALID", "Token has incorrect length.", false));
+        return Err(AppError::new(
+            "INVITE_INVALID",
+            "Token has incorrect length.",
+            false,
+        ));
     }
     token_bytes.copy_from_slice(&decoded);
 
@@ -404,7 +461,16 @@ pub async fn join_room(
             *guard = Some(tx);
         }
 
-        let handle = spawn_session_task(session, rx, app_handle, pv_arc, my_generation, gen_arc, session_tx_slot, session_id);
+        let handle = spawn_session_task(
+            session,
+            rx,
+            app_handle,
+            pv_arc,
+            my_generation,
+            gen_arc,
+            session_tx_slot,
+            session_id,
+        );
         if let Ok(mut h) = handle_slot.lock() {
             *h = Some(handle);
         }
@@ -415,9 +481,7 @@ pub async fn join_room(
 
 /// Get the current room state (for UI recovery after reload).
 #[tauri::command]
-pub async fn get_room_snapshot(
-    state: State<'_, AppState>
-) -> Result<RoomSnapshot, AppError> {
+pub async fn get_room_snapshot(state: State<'_, AppState>) -> Result<RoomSnapshot, AppError> {
     Ok(RoomSnapshot {
         connected: state.has_active_session(),
         peer_verified: state.peer_verified.load(Ordering::SeqCst),
@@ -432,20 +496,28 @@ pub async fn confirm_peer_verified(
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
     if !state.has_active_session() {
-        return Err(AppError::new("SESSION_NOT_ACTIVE", "No active session to verify.", false));
+        return Err(AppError::new(
+            "SESSION_NOT_ACTIVE",
+            "No active session to verify.",
+            false,
+        ));
     }
 
-    log::debug!("confirm_peer_verified: active={}, peer_verified_before={}",
+    log::debug!(
+        "confirm_peer_verified: active={}, peer_verified_before={}",
         state.has_active_session(),
         state.peer_verified.load(Ordering::SeqCst),
     );
 
     state.peer_verified.store(true, Ordering::SeqCst);
 
-    let _ = app_handle.emit("room_state_changed", serde_json::json!({
-        "connected": true,
-        "peer_verified": true
-    }));
+    let _ = app_handle.emit(
+        "room_state_changed",
+        serde_json::json!({
+            "connected": true,
+            "peer_verified": true
+        }),
+    );
 
     Ok(())
 }
@@ -457,17 +529,18 @@ pub async fn trust_new_server_identity(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     if !state.consume_identity_change(&change_id) {
-        return Err(AppError::new("STALE_IDENTITY_CHANGE", "This identity prompt is no longer valid.", false));
+        return Err(AppError::new(
+            "STALE_IDENTITY_CHANGE",
+            "This identity prompt is no longer valid.",
+            false,
+        ));
     }
     Ok(())
 }
 
 /// Reset the stored TOFU pin for a relay (used in Settings).
 #[tauri::command]
-pub async fn reset_server_pin(
-    relay: String,
-    _state: State<'_, AppState>,
-) -> Result<(), AppError> {
+pub async fn reset_server_pin(relay: String, _state: State<'_, AppState>) -> Result<(), AppError> {
     log::info!("Pin reset requested for: {}", relay);
     // TODO: call DiskPinStore::remove(relay) — requires exposing that API
     Ok(())
@@ -480,7 +553,8 @@ pub async fn send_message(
     text: String,
     state: State<'_, AppState>,
 ) -> Result<MessageAck, AppError> {
-    log::debug!("send_message called: text_len={}, peer_verified={}, has_active_session={}",
+    log::debug!(
+        "send_message called: text_len={}, peer_verified={}, has_active_session={}",
         text.len(),
         state.peer_verified.load(Ordering::SeqCst),
         state.has_active_session()
@@ -488,20 +562,28 @@ pub async fn send_message(
 
     // Block if not verified
     if !state.peer_verified.load(Ordering::SeqCst) {
-        return Err(AppError::new("SESSION_UNVERIFIED", "Cannot send messages before verifying the peer.", false));
+        return Err(AppError::new(
+            "SESSION_UNVERIFIED",
+            "Cannot send messages before verifying the peer.",
+            false,
+        ));
     }
 
     let tx = {
         let guard = state.session_tx.lock().await;
         guard.clone()
     };
-    
+
     let tx = tx.ok_or_else(|| AppError::new("SESSION_NOT_ACTIVE", "No active session.", false))?;
 
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    tx.send(SessionCmd::SendText(text, oneshot_tx)).await.map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Session channel closed.", false))?;
+    tx.send(SessionCmd::SendText(text, oneshot_tx))
+        .await
+        .map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Session channel closed.", false))?;
 
-    let result = oneshot_rx.await.map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Response channel dropped.", false))?;
+    let result = oneshot_rx
+        .await
+        .map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Response channel dropped.", false))?;
     log::info!("send_message dispatch result: {:?}", result);
     result
 }
@@ -523,7 +605,10 @@ pub async fn leave_room(
 
     state.clear_session_state();
 
-    let _ = app_handle.emit("room_state_changed", serde_json::json!({ "connected": false }));
+    let _ = app_handle.emit(
+        "room_state_changed",
+        serde_json::json!({ "connected": false }),
+    );
 
     Ok(())
 }

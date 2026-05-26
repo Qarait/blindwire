@@ -21,10 +21,10 @@
 //! subsequent connections must present the same SPKI hash.
 //! A changed hash is treated as a potential MITM and hard-rejected.
 
-use std::sync::Arc;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 /// SPKI-SHA256 pins for the official BlindWire signaling relay.
 ///
@@ -63,18 +63,17 @@ pub enum PinError {
 impl std::fmt::Display for PinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PinError::OfficialPinMismatch =>
-                write!(f, "official server SPKI-pin mismatch — possible MITM"),
-            PinError::IdentityChanged =>
-                write!(f, "server identity changed — possible MITM"),
-            PinError::FirstUsePinned =>
-                write!(f, "first-use: server SPKI pinned via TOFU"),
-            PinError::HostnameMismatch =>
-                write!(f, "hostname mismatch: cert SAN does not cover connected hostname"),
-            PinError::TlsError(s) =>
-                write!(f, "TLS error: {s}"),
-            PinError::SpkiExtractionFailed =>
-                write!(f, "could not extract SPKI from certificate"),
+            PinError::OfficialPinMismatch => {
+                write!(f, "official server SPKI-pin mismatch — possible MITM")
+            }
+            PinError::IdentityChanged => write!(f, "server identity changed — possible MITM"),
+            PinError::FirstUsePinned => write!(f, "first-use: server SPKI pinned via TOFU"),
+            PinError::HostnameMismatch => write!(
+                f,
+                "hostname mismatch: cert SAN does not cover connected hostname"
+            ),
+            PinError::TlsError(s) => write!(f, "TLS error: {s}"),
+            PinError::SpkiExtractionFailed => write!(f, "could not extract SPKI from certificate"),
         }
     }
 }
@@ -108,9 +107,7 @@ impl DiskPinStore {
         }
         let content = std::fs::read_to_string(&self.path).ok()?;
         for line in content.lines() {
-            let mut parts = line.splitn(2, ':');
-            let stored_host = parts.next()?;
-            let stored_hex = parts.next()?;
+            let (stored_host, stored_hex) = line.split_once(':')?;
             if stored_host == host {
                 let mut hash = [0u8; 32];
                 hex::decode_to_slice(stored_hex, &mut hash).ok()?;
@@ -201,8 +198,7 @@ pub(crate) fn spki_sha256(cert: &CertificateDer<'_>) -> Result<[u8; 32], PinErro
     //
     // We use webpki's ring-based parser to obtain this.
     use webpki::EndEntityCert;
-    let parsed = EndEntityCert::try_from(cert)
-        .map_err(|_| PinError::SpkiExtractionFailed)?;
+    let parsed = EndEntityCert::try_from(cert).map_err(|_| PinError::SpkiExtractionFailed)?;
 
     // `subject_public_key_info()` returns a `SubjectPublicKeyInfoDer<'_>`
     let spki_der = parsed.subject_public_key_info().to_vec();
@@ -220,18 +216,13 @@ pub(crate) fn spki_sha256(cert: &CertificateDer<'_>) -> Result<[u8; 32], PinErro
 /// SAN validation does **not** conflict with pinning — it's an additive constraint:
 /// - SPKI must match expected pin  
 /// - AND cert SAN must cover the hostname you believe you're connecting to
-pub(crate) fn validate_san(
-    cert: &CertificateDer<'_>,
-    hostname: &str,
-) -> Result<(), rustls::Error> {
+pub(crate) fn validate_san(cert: &CertificateDer<'_>, hostname: &str) -> Result<(), rustls::Error> {
     use rustls_pki_types::ServerName;
     use webpki::EndEntityCert;
 
-    let parsed = EndEntityCert::try_from(cert)
-        .map_err(|_| PinError::SpkiExtractionFailed)?;
+    let parsed = EndEntityCert::try_from(cert).map_err(|_| PinError::SpkiExtractionFailed)?;
 
-    let name = ServerName::try_from(hostname)
-        .map_err(|_| PinError::HostnameMismatch)?;
+    let name = ServerName::try_from(hostname).map_err(|_| PinError::HostnameMismatch)?;
 
     parsed
         .verify_is_valid_for_subject_name(&name)
@@ -265,6 +256,7 @@ impl BlindWireVerifier {
 
     /// Exposed for tests (allows computing match-ready hashes without a real cert).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn spki_sha256_test(cert: &CertificateDer<'_>) -> Result<[u8; 32], PinError> {
         spki_sha256(cert)
     }
@@ -409,8 +401,12 @@ mod tests {
 
     #[test]
     fn test_pin_error_display() {
-        assert!(PinError::OfficialPinMismatch.to_string().contains("official"));
-        assert!(PinError::IdentityChanged.to_string().contains("identity changed"));
+        assert!(PinError::OfficialPinMismatch
+            .to_string()
+            .contains("official"));
+        assert!(PinError::IdentityChanged
+            .to_string()
+            .contains("identity changed"));
         let e: rustls::Error = PinError::IdentityChanged.into();
         assert!(matches!(e, rustls::Error::General(_)));
     }
@@ -433,15 +429,17 @@ mod tests {
         assert!(result.is_err());
         // Confirm the stable error code is present in the message
         let err_str = result.unwrap_err().to_string();
-        assert!(err_str.contains("official") || err_str.contains("SPKI"),
-            "Unexpected error: {err_str}");
+        assert!(
+            err_str.contains("official") || err_str.contains("SPKI"),
+            "Unexpected error: {err_str}"
+        );
     }
 
     #[test]
     fn test_tofu_pin_then_match_then_change_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let verifier = BlindWireVerifier::new("blindwire.io", Arc::clone(&store));
+        let _verifier = BlindWireVerifier::new("blindwire.io", Arc::clone(&store));
 
         let cert_data = vec![0x55u8; 64];
         let cert = CertificateDer::from(cert_data.clone());
@@ -454,7 +452,7 @@ mod tests {
         // Simulate what the verifier would store: seed it directly.
         store.save_pin("custom-test.io", expected_hash).unwrap();
 
-        let server = ServerName::from(DnsName::try_from("custom-test.io").unwrap());
+        let _server = ServerName::from(DnsName::try_from("custom-test.io").unwrap());
 
         // Second connection — cert produces same hash → accepted
         // NOTE: since our test cert isn't real X.509, SPKI extraction will fail.
@@ -464,7 +462,7 @@ mod tests {
         // Changed cert → identity changed → rejected
         let evil_cert = CertificateDer::from(vec![0xEE; 32]);
         let store2 = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let verifier2 = BlindWireVerifier::new("blindwire.io", store2);
+        let _verifier2 = BlindWireVerifier::new("blindwire.io", store2);
         // Its store has custom-test.io → expected_hash seeded above.
         // The evil cert would hash to something different (SPKI extraction will
         // fall through to General error), so let's just validate the store logic.
@@ -579,7 +577,11 @@ mod tests {
         // Cert has SAN: relay.example.com — same hostname must pass
         let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
         let result = validate_san(&cert, "relay.example.com");
-        assert!(result.is_ok(), "SAN check must pass for matching hostname: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "SAN check must pass for matching hostname: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -588,7 +590,10 @@ mod tests {
         // This represents "correct SPKI pin but wrong hostname" (attacker key-reuse scenario).
         let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
         let result = validate_san(&cert, "attacker.example.com");
-        assert!(result.is_err(), "SAN check must fail for mismatched hostname");
+        assert!(
+            result.is_err(),
+            "SAN check must fail for mismatched hostname"
+        );
         let err_str = result.unwrap_err().to_string();
         assert!(
             err_str.contains("hostname mismatch"),

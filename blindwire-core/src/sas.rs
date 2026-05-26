@@ -130,8 +130,7 @@ pub const SAS_EMOJIS: &[&str] = &[
 pub fn generate(shared_secret: &[u8; 32], session_id: &[u8; 32]) -> Vec<String> {
     let hk = Hkdf::<Sha256>::new(Some(session_id), shared_secret);
     let mut okm = [0u8; 7];
-    hk.expand(b"blindwire-sas-v1", &mut okm)
-        .expect("HKDF expansion should never fail for 7 bytes");
+    let _ = hk.expand(b"blindwire-sas-v1", &mut okm);
 
     okm.iter()
         .map(|&idx| SAS_EMOJIS[idx as usize].to_string())

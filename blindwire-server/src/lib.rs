@@ -365,6 +365,13 @@ async fn handle_connection_ws(
         session.last_activity = Instant::now();
 
         if role == 'i' {
+            if session.initiator_tx.is_some() {
+                let _ = tx
+                    .send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])
+                    .await;
+                return Ok(());
+            }
+
             // Mint token for Initiator
             let mut token = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut token);
@@ -375,12 +382,6 @@ async fn handle_connection_ws(
             token_pkt.push(Opcode::Token as u8);
             token_pkt.extend_from_slice(&token);
             let _ = tx.send(token_pkt).await;
-            if session.initiator_tx.is_some() {
-                let _ = tx
-                    .send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])
-                    .await;
-                return Ok(());
-            }
             session.initiator_tx = Some(tx.clone()); // We use clone for the loop
             if let Some(ref peer_tx) = session.responder_tx {
                 let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);

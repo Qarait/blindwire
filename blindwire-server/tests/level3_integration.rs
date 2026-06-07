@@ -199,15 +199,20 @@ async fn test_scenario_c_duplicate_role_taken() {
     join.extend_from_slice(&session_id);
     i1_ws.send(Message::Binary(join.clone())).await.unwrap();
 
-    // Consume TOKEN_MINTED
-    i1_ws.next().await.unwrap().unwrap();
+    // Save the legitimate initiator's token.
+    let original_token = match i1_ws.next().await.unwrap().unwrap() {
+        Message::Binary(data) if data.len() == 33 && data[0] == 0x06 => {
+            let mut token = [0u8; 32];
+            token.copy_from_slice(&data[1..]);
+            token
+        }
+        other => panic!("Expected TOKEN_MINTED, got {other:?}"),
+    };
 
     let (mut i2_ws, _) = connect_async(&url).await.unwrap();
     i2_ws.send(Message::Binary(join)).await.unwrap();
 
-    // Consume TOKEN_MINTED for i2
-    i2_ws.next().await.unwrap().unwrap();
-
+    // A duplicate initiator must be rejected before any replacement token is minted.
     if let Some(Ok(Message::Binary(data))) = i2_ws.next().await {
         assert_eq!(data[0], 0x05); // ERROR
         assert_eq!(data[1], 0x01); // ROLE_TAKEN
@@ -216,6 +221,17 @@ async fn test_scenario_c_duplicate_role_taken() {
     }
     while (i2_ws.next().await).is_some() {}
 
+    // The rejected duplicate must not invalidate the original invitation.
+    let (mut r_ws, _) = connect_async(&url).await.unwrap();
+    let mut responder_join = vec![0x00, 0x72, 0x02];
+    responder_join.extend_from_slice(&session_id);
+    responder_join.extend_from_slice(&original_token);
+    r_ws.send(Message::Binary(responder_join)).await.unwrap();
+
+    let peer_joined = i1_ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!(peer_joined[0], 0x02);
+
+    r_ws.send(Message::Binary(vec![0x02])).await.unwrap();
     i1_ws.send(Message::Binary(vec![0x02])).await.unwrap();
     assert!(i1_ws.next().await.is_some());
 }

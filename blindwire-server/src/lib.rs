@@ -152,7 +152,7 @@ pub async fn run_server(listener: TcpListener) {
     });
 
     while let Ok((stream, peer_addr)) = listener.accept().await {
-        log::debug!("[SERVER] Accepted connection from {}", peer_addr);
+        log::debug!("[SERVER] Accepted connection from {peer_addr}");
         let sessions = sessions.clone();
         let ip_conns = ip_conns.clone();
         let ip_bursts = ip_bursts.clone();

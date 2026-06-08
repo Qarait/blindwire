@@ -101,7 +101,7 @@ fn spawn_session_task(
     tauri::async_runtime::spawn(async move {
         // Complete handshake first (blocks for initiator until responder joins)
         if let Err(e) = session.handshake().await {
-            log::error!("Handshake failed: {:?}", e);
+            log::error!("Handshake failed: {e:?}");
             let err = AppError::from(e);
             let _ = app_handle.emit("join_failed", err);
             // Cleanup
@@ -158,7 +158,7 @@ fn spawn_session_task(
                             let _ = app_handle.emit("message_received", MsgEvent { text, timestamp: now_ms() });
                         }
                         Err(TransportError::SessionTerminated) | Err(TransportError::PeerDisconnected) => {
-                            log::warn!("Session ended gracefully or peer disconnected. Generation: {}", my_generation);
+                            log::warn!("Session ended gracefully or peer disconnected. Generation: {my_generation}");
                             clear_flag.store(false, Ordering::SeqCst);
                             let mut guard = session_tx_slot.lock().await;
                             *guard = None;
@@ -166,7 +166,7 @@ fn spawn_session_task(
                             break;
                         }
                         Err(e) => {
-                            log::error!("Sessionrecv() error: {:?}. Generation: {}", e, my_generation);
+                            log::error!("Sessionrecv() error: {e:?}. Generation: {my_generation}");
                             clear_flag.store(false, Ordering::SeqCst);
                             let mut guard = session_tx_slot.lock().await;
                             *guard = None;
@@ -282,13 +282,10 @@ pub async fn create_room(
     // Allow overriding the dev relay URL via env var for testing
     let relay_url = std::env::var("BLINDWIRE_RELAY_URL").unwrap_or_else(|_| {
         let fallback = "ws://127.0.0.1:8080".to_string();
-        log::warn!(
-            "BLINDWIRE_RELAY_URL is missing, using fallback: {}",
-            fallback
-        );
+        log::warn!("BLINDWIRE_RELAY_URL is missing, using fallback: {fallback}");
         fallback
     });
-    log::info!("exact relay URL being used: {}", relay_url);
+    log::info!("exact relay URL being used: {relay_url}");
 
     // 4. Connect as Initiator and await server-minted token
     let config = TransportConfig::initiator(relay_url.clone(), session_id).with_insecure_dev();
@@ -305,7 +302,7 @@ pub async fn create_room(
             success
         }
         Ok(Err(e)) => {
-            log::error!("connect failure: {:?}", e);
+            log::error!("connect failure: {e:?}");
             return Err(AppError::from(e));
         }
         Err(_) => {
@@ -340,10 +337,8 @@ pub async fn create_room(
     // 5. Build the canonical invite URI
     // Expiry: 1 hour from now
     let exp = now_ms() + 3_600_000;
-    let invite_uri = format!(
-        "blindwire://join?v=1&r={}&t={}&e={}&u={}",
-        room_id, token_b64, exp, relay_url
-    );
+    let invite_uri =
+        format!("blindwire://join?v=1&r={room_id}&t={token_b64}&e={exp}&u={relay_url}");
 
     let session_tx_slot = state.session_tx.clone();
     let pv_arc = state.peer_verified.clone();
@@ -541,7 +536,7 @@ pub async fn trust_new_server_identity(
 /// Reset the stored TOFU pin for a relay (used in Settings).
 #[tauri::command]
 pub async fn reset_server_pin(relay: String, _state: State<'_, AppState>) -> Result<(), AppError> {
-    log::info!("Pin reset requested for: {}", relay);
+    log::info!("Pin reset requested for: {relay}");
     // TODO: call DiskPinStore::remove(relay) — requires exposing that API
     Ok(())
 }
@@ -584,7 +579,7 @@ pub async fn send_message(
     let result = oneshot_rx
         .await
         .map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Response channel dropped.", false))?;
-    log::info!("send_message dispatch result: {:?}", result);
+    log::info!("send_message dispatch result: {result:?}");
     result
 }
 
@@ -624,7 +619,7 @@ pub async fn frontend_ready(
 
     let mut pending_lock = state.pending_deep_link.lock().await;
     if let Some(uri) = pending_lock.take() {
-        log::info!("Dispatching queued deep link: {}", uri);
+        log::info!("Dispatching queued deep link: {uri}");
         let _ = app_handle.emit("blindwire-deep-link", uri);
     }
 

@@ -46,17 +46,17 @@ pub enum TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ConnectionFailed(msg) => write!(f, "connection failed: {}", msg),
+            Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
             Self::HandshakeFailed => write!(f, "handshake failed"),
-            Self::Protocol(e) => write!(f, "protocol error: {:?}", e),
+            Self::Protocol(e) => write!(f, "protocol error: {e:?}"),
             Self::SessionTerminated => write!(f, "session terminated"),
             Self::Timeout => write!(f, "operation timed out"),
             Self::ContainsNul => write!(f, "message contains NUL bytes"),
             Self::MessageTooLong => write!(f, "message exceeds 4000 byte limit"),
             Self::InvalidUtf8 => write!(f, "message is not valid UTF-8"),
-            Self::WebSocket(msg) => write!(f, "websocket error: {}", msg),
+            Self::WebSocket(msg) => write!(f, "websocket error: {msg}"),
             Self::PeerDisconnected => write!(f, "peer disconnected"),
-            Self::UnexpectedResponse(op) => write!(f, "unexpected server response: 0x{:02x}", op),
+            Self::UnexpectedResponse(op) => write!(f, "unexpected server response: 0x{op:02x}"),
             Self::VersionMismatch => write!(f, "protocol version mismatch"),
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
         }

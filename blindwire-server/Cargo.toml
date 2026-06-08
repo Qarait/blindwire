@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 blindwire-core = { path = "../blindwire-core" }
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.24"
 futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"

@@ -299,7 +299,7 @@ impl ServerCertVerifier for BlindWireVerifier {
 
         // ── 1. Official server (hard-pinned) ─────────────────────────────────
         if host == self.official_domain {
-            if OFFICIAL_PINS.iter().any(|&p| p == pin) {
+            if OFFICIAL_PINS.contains(&pin) {
                 // Pin matched — also validate the SAN covers this hostname.
                 validate_san(end_entity, raw_host)?;
                 return Ok(rustls::client::danger::ServerCertVerified::assertion());

@@ -131,9 +131,8 @@ impl PinStore {
                 Err(e) => {
                     // Fix B: Fail closed on read errors
                     panic!(
-                        "SECURITY FATAL: Cannot read pin store at {:?}: {}. \
+                        "SECURITY FATAL: Cannot read pin store at {path:?}: {e}. \
                         Manual intervention required. Delete or fix the file to proceed.",
-                        path, e
                     );
                 }
             };
@@ -142,9 +141,8 @@ impl PinStore {
                 Err(e) => {
                     // Fix B: Fail closed on parse errors (corruption)
                     panic!(
-                        "SECURITY FATAL: Pin store at {:?} is corrupted: {}. \
+                        "SECURITY FATAL: Pin store at {path:?} is corrupted: {e}. \
                         This could indicate tampering. Manual intervention required.",
-                        path, e
                     );
                 }
             }
@@ -159,25 +157,22 @@ impl PinStore {
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
                 panic!(
-                    "SECURITY FATAL: Cannot create pin store directory {:?}: {}. \
+                    "SECURITY FATAL: Cannot create pin store directory {parent:?}: {e}. \
                     Pin persistence failed - security guarantee violated.",
-                    parent, e
                 );
             }
         }
         let data = match serde_json::to_string_pretty(self) {
             Ok(d) => d,
             Err(e) => panic!(
-                "SECURITY FATAL: Cannot serialize pin store: {}. \
+                "SECURITY FATAL: Cannot serialize pin store: {e}. \
                 This should never happen.",
-                e
             ),
         };
         if let Err(e) = fs::write(&path, data) {
             panic!(
-                "SECURITY FATAL: Cannot write pin store to {:?}: {}. \
+                "SECURITY FATAL: Cannot write pin store to {path:?}: {e}. \
                 Pin persistence failed - security guarantee violated.",
-                path, e
             );
         }
     }
@@ -349,7 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 role = path_segments[1].chars().next().unwrap_or('r');
 
                                 let scheme = if is_local { "ws" } else { "wss" };
-                                server_url = format!("{}://{}:{}", scheme, host, port);
+                                server_url = format!("{scheme}://{host}:{port}");
                             }
                         }
                     }
@@ -417,7 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(stdout, Clear(ClearType::All), cursor::Hide)?;
 
     if let Err(e) = app.run().await {
-        app.log.push(format!("Error: {}", e));
+        app.log.push(format!("Error: {e}"));
     }
 
     disable_raw_mode()?;
@@ -595,7 +590,7 @@ impl App {
             tokio::select! {
                 Some(event) = event_rx.recv() => {
                     if let Err(e) = self.handle_event(event, &net_tx).await {
-                        self.status = format!("ERROR: {:?}", e);
+                        self.status = format!("ERROR: {e:?}");
                         return Err(e);
                     }
                 }
@@ -623,9 +618,9 @@ impl App {
                                                     let mut data = vec![Opcode::Relay as u8];
                                                     data.extend(frame.to_wire());
                                                     let _ = net_tx.send(data).await;
-                                                    self.log.push(format!("You: {}", text));
+                                                    self.log.push(format!("You: {text}"));
                                                 }
-                                                Err(e) => self.log.push(format!("Error: {:?}", e)),
+                                                Err(e) => self.log.push(format!("Error: {e:?}")),
                                             }
                                         } else {
                                             self.log.push("Cannot send: Session not active".to_string());
@@ -689,9 +684,9 @@ impl App {
                 self.log.push(
                     "═══════════════════════════════════════════════════════════════".to_string(),
                 );
-                self.log.push(format!("NEW CERTIFICATE for: {}", host));
+                self.log.push(format!("NEW CERTIFICATE for: {host}"));
                 self.log
-                    .push(format!("Fingerprint (SHA256): {}", fingerprint));
+                    .push(format!("Fingerprint (SHA256): {fingerprint}"));
                 self.log.push(
                     "───────────────────────────────────────────────────────────────".to_string(),
                 );
@@ -721,7 +716,7 @@ impl App {
                                 Ok(res) => match res {
                                     SessionReceiveResult::Message(text) => {
                                         let clean_text = sanitize_text(&text);
-                                        self.log.push(format!("Peer: {}", clean_text));
+                                        self.log.push(format!("Peer: {clean_text}"));
                                     }
                                     SessionReceiveResult::HandshakeResponse(f) => {
                                         let mut data = vec![Opcode::Relay as u8];
@@ -734,7 +729,7 @@ impl App {
                                                 .to_string(),
                                         );
                                         if let Some(fp) = self.session.fingerprint() {
-                                            self.log.push(format!("Fingerprint: {}", fp));
+                                            self.log.push(format!("Fingerprint: {fp}"));
                                         }
                                         let mut data = vec![Opcode::Relay as u8];
                                         data.extend(f.to_wire());
@@ -746,7 +741,7 @@ impl App {
                                                 .to_string(),
                                         );
                                         if let Some(fp) = self.session.fingerprint() {
-                                            self.log.push(format!("Fingerprint: {}", fp));
+                                            self.log.push(format!("Fingerprint: {fp}"));
                                         }
                                     }
                                     SessionReceiveResult::Terminated => {
@@ -757,13 +752,13 @@ impl App {
                                     _ => {}
                                 },
                                 Err(e) => {
-                                    self.log.push(format!("Protocol Error: {:?}", e));
+                                    self.log.push(format!("Protocol Error: {e:?}"));
                                     self.session.terminate();
                                     return Err(e.into());
                                 }
                             },
                             Err(e) => {
-                                self.log.push(format!("Framing Error: {:?}", e));
+                                self.log.push(format!("Framing Error: {e:?}"));
                                 self.session.terminate();
                                 return Err(e.into());
                             }
@@ -803,13 +798,13 @@ impl App {
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
                             Ok(other) => {
-                                self.log.push(format!("Server Error: {:?}", other));
+                                self.log.push(format!("Server Error: {other:?}"));
                                 self.session.terminate();
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
                             Err(_) => {
                                 self.log
-                                    .push(format!("Server Error: Unknown code 0x{:02x}", code));
+                                    .push(format!("Server Error: Unknown code 0x{code:02x}"));
                                 self.session.terminate();
                                 return Err(Box::new(ProtocolError::SessionTerminated));
                             }
@@ -848,7 +843,7 @@ impl App {
                 print!("Scan to Join:");
                 for (i, line) in qr.iter().enumerate() {
                     execute!(stdout, cursor::MoveTo(62, 4 + i as u16))?;
-                    print!("{}", line);
+                    print!("{line}");
                 }
             }
         }
@@ -857,7 +852,7 @@ impl App {
             execute!(stdout, cursor::MoveTo(0, 3 + i as u16))?;
             execute!(stdout, Clear(ClearType::CurrentLine))?;
             if let Some(line) = self.log.get(self.log.len().saturating_sub(10) + i) {
-                println!("{}", line);
+                println!("{line}");
             }
         }
 

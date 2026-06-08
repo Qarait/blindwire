@@ -62,7 +62,7 @@ jobs:
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf shellcheck
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -72,6 +72,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check deployment scripts
+        run: shellcheck deploy/scripts/*.sh
 
       - name: Run clippy
         run: cargo clippy --workspace --all-features -- -D warnings

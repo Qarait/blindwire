@@ -41,6 +41,7 @@ const MAX_TOTAL_CONNECTIONS: usize = 1000;
 // Packet format [Opcode:1][Length:2][Frame:N]
 // Hard limit: 1 + 2 + 4096 = 4099 bytes.
 const MAX_PACKET_SIZE: usize = 4099;
+const HANDSHAKE_FRAME_TYPE: u8 = 0x01;
 
 /// Fix D: Core opcodes only - errors use ERROR(0x05) + ErrorCode
 #[repr(u8)]
@@ -92,7 +93,14 @@ struct Session {
     created_at: Instant,
     last_activity: Instant,
     token: Option<[u8; 32]>,
-    token_consumed: bool,
+    token_state: TokenState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenState {
+    Available,
+    Reserved,
+    Consumed,
 }
 
 type SessionMap = Arc<DashMap<String, Session>>;
@@ -290,11 +298,21 @@ async fn handle_connection_ws(
 
             // Validate token
             if let Some(mut session) = sessions.get_mut(&session_id) {
-                if session.token_consumed || session.token != Some(join_token) {
+                if session.token_state == TokenState::Consumed || session.token != Some(join_token)
+                {
                     let _ = ws_tx
                         .send(Message::Binary(vec![
                             Opcode::Error as u8,
                             ErrorCode::Unauthorized as u8,
+                        ]))
+                        .await;
+                    return Ok(());
+                }
+                if session.token_state == TokenState::Reserved || session.responder_tx.is_some() {
+                    let _ = ws_tx
+                        .send(Message::Binary(vec![
+                            Opcode::Error as u8,
+                            ErrorCode::RoleTaken as u8,
                         ]))
                         .await;
                     return Ok(());
@@ -309,7 +327,7 @@ async fn handle_connection_ws(
                         .await;
                     return Ok(());
                 }
-                session.token_consumed = true;
+                session.token_state = TokenState::Reserved;
             } else {
                 // Room doesn't exist
                 let _ = ws_tx
@@ -359,7 +377,7 @@ async fn handle_connection_ws(
             created_at: Instant::now(),
             last_activity: Instant::now(),
             token: None,
-            token_consumed: false,
+            token_state: TokenState::Available,
         });
 
         session.last_activity = Instant::now();
@@ -376,6 +394,7 @@ async fn handle_connection_ws(
             let mut token = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut token);
             session.token = Some(token);
+            session.token_state = TokenState::Available;
 
             // Send token to Initiator: [0x06][token:32]
             let mut token_pkt = Vec::with_capacity(33);
@@ -390,6 +409,9 @@ async fn handle_connection_ws(
             }
         } else {
             if session.responder_tx.is_some() {
+                if session.token_state == TokenState::Reserved {
+                    session.token_state = TokenState::Available;
+                }
                 let _ = tx
                     .send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])
                     .await;
@@ -440,11 +462,12 @@ async fn handle_connection_ws(
                                 let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break;
                             }
+                            let is_handshake_frame = data[3] == HANDSHAKE_FRAME_TYPE;
 
                             log::trace!("[SERVER] RELAY from {} (size: {})", role, data.len());
 
                             // Relay to peer
-                            if let Some(s) = sessions.get(&session_id) {
+                            if let Some(mut s) = sessions.get_mut(&session_id) {
                                 let peer_tx = if role == 'i' { &s.responder_tx } else { &s.initiator_tx };
                                 if let Some(ptx) = peer_tx {
                                     if ptx.try_send(data).is_err() {
@@ -452,6 +475,12 @@ async fn handle_connection_ws(
                                         let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::QueueFull as u8]).await;
                                         relay_result = Err("Queue full");
                                         break;
+                                    }
+                                    if role == 'i'
+                                        && is_handshake_frame
+                                        && s.token_state == TokenState::Reserved
+                                    {
+                                        s.token_state = TokenState::Consumed;
                                     }
                                 }
                             }
@@ -470,6 +499,9 @@ async fn handle_connection_ws(
             s.initiator_tx = None;
         } else {
             s.responder_tx = None;
+            if s.token_state == TokenState::Reserved {
+                s.token_state = TokenState::Available;
+            }
         }
 
         // Notify peer of our departure (Quit or Kill)

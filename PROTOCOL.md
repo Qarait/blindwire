@@ -24,6 +24,13 @@ BlindWire enforces a "One Strike" security policy. Any protocol deviation, inclu
 - **Rekeying**: Permitted but not required for v1.
 - **Verification**: Initiator and Responder should compare fingerprints (32-byte hash) via an external secure channel.
 
+### 1.3 Invitation Token Lifecycle
+- **Available**: A server-minted responder token may authorize one responder.
+- **Reserved**: A valid responder JOIN reserves the token while the transport is connected.
+- **Pre-Handshake Retry**: If that transport disconnects before any Noise handshake frame is relayed, the reservation is released and the same invitation may be retried.
+- **Consumed**: The first successfully relayed Noise handshake frame permanently consumes the token.
+- **One Strike Boundary**: Disconnects or failures after handshake traffic begins are terminal and require a new room.
+
 ---
 
 ## 2. Wire Framing

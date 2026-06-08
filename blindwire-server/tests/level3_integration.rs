@@ -237,6 +237,116 @@ async fn test_scenario_c_duplicate_role_taken() {
 }
 
 #[tokio::test]
+async fn test_responder_token_reusable_before_handshake_starts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{addr}");
+
+    tokio::spawn(async move {
+        run_server(listener).await;
+    });
+
+    let session_id = [0xC4u8; 32];
+    let (mut i_ws, _) = connect_async(&url).await.unwrap();
+    let mut i_join = vec![0x00, 0x69, 0x02];
+    i_join.extend_from_slice(&session_id);
+    i_ws.send(Message::Binary(i_join)).await.unwrap();
+
+    let token_packet = i_ws.next().await.unwrap().unwrap().into_data();
+    let mut token = [0u8; 32];
+    token.copy_from_slice(&token_packet[1..33]);
+
+    let mut responder_join = vec![0x00, 0x72, 0x02];
+    responder_join.extend_from_slice(&session_id);
+    responder_join.extend_from_slice(&token);
+
+    let (mut r1_ws, _) = connect_async(&url).await.unwrap();
+    r1_ws
+        .send(Message::Binary(responder_join.clone()))
+        .await
+        .unwrap();
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x02);
+
+    drop(r1_ws);
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x03);
+
+    let (mut r2_ws, _) = connect_async(&url).await.unwrap();
+    r2_ws.send(Message::Binary(responder_join)).await.unwrap();
+
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x02);
+}
+
+#[tokio::test]
+async fn test_responder_token_consumed_when_handshake_starts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{addr}");
+
+    tokio::spawn(async move {
+        run_server(listener).await;
+    });
+
+    let session_id = [0xC5u8; 32];
+    let (mut i_ws, _) = connect_async(&url).await.unwrap();
+    let mut i_join = vec![0x00, 0x69, 0x02];
+    i_join.extend_from_slice(&session_id);
+    i_ws.send(Message::Binary(i_join)).await.unwrap();
+
+    let token_packet = i_ws.next().await.unwrap().unwrap().into_data();
+    let mut token = [0u8; 32];
+    token.copy_from_slice(&token_packet[1..33]);
+
+    let mut responder_join = vec![0x00, 0x72, 0x02];
+    responder_join.extend_from_slice(&session_id);
+    responder_join.extend_from_slice(&token);
+
+    let (mut r1_ws, _) = connect_async(&url).await.unwrap();
+    r1_ws
+        .send(Message::Binary(responder_join.clone()))
+        .await
+        .unwrap();
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x02);
+    assert_eq!(r1_ws.next().await.unwrap().unwrap().into_data()[0], 0x02);
+
+    let mut invalid_join = responder_join.clone();
+    *invalid_join.last_mut().unwrap() ^= 0xFF;
+    let (mut invalid_ws, _) = connect_async(&url).await.unwrap();
+    invalid_ws
+        .send(Message::Binary(invalid_join))
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_ws.next().await.unwrap().unwrap().into_data(),
+        vec![0x05, 0x04]
+    );
+
+    let (mut duplicate_ws, _) = connect_async(&url).await.unwrap();
+    duplicate_ws
+        .send(Message::Binary(responder_join.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate_ws.next().await.unwrap().unwrap().into_data(),
+        vec![0x05, 0x01]
+    );
+
+    // The first Noise handshake frame crosses the point-of-no-return.
+    i_ws.send(Message::Binary(vec![0x01, 0x00, 0x01, 0x01]))
+        .await
+        .unwrap();
+    assert_eq!(r1_ws.next().await.unwrap().unwrap().into_data()[0], 0x01);
+
+    drop(r1_ws);
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x03);
+
+    let (mut r2_ws, _) = connect_async(&url).await.unwrap();
+    r2_ws.send(Message::Binary(responder_join)).await.unwrap();
+
+    let error = r2_ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!(error, vec![0x05, 0x04]); // ERROR(UNAUTHORIZED)
+}
+
+#[tokio::test]
 async fn test_scenario_d_bounded_queue_backpressure() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

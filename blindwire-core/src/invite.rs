@@ -71,6 +71,8 @@ impl fmt::Display for InviteError {
 impl std::error::Error for InviteError {}
 
 // Official relay canonical address
+/// Canonical hostname of the official BlindWire signaling relay.
+pub const OFFICIAL_RELAY_HOST: &str = "relay.blindwire.io";
 const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.io";
 
 impl InvitePayload {
@@ -262,7 +264,7 @@ fn is_base64url_unpadded(s: &str) -> bool {
 fn matches_official_relay(url: &Url) -> bool {
     // Official is wss://relay.blindwire.io (with or without internal ports/paths)
     // To be strict, domain must be relay.blindwire.io exactly.
-    url.domain() == Some("relay.blindwire.io")
+    url.domain() == Some(OFFICIAL_RELAY_HOST)
 }
 
 #[cfg(test)]

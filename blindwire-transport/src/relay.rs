@@ -11,7 +11,7 @@
 
 use crate::config::TransportConfig;
 use crate::error::TransportError;
-use crate::pinning::{BlindWireVerifier, DiskPinStore};
+use crate::pinning::{BlindWireVerifier, DiskPinStore, OFFICIAL_RELAY_HOST};
 use blindwire_core::frame::Frame;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
@@ -76,7 +76,7 @@ impl RelayTransport {
         let store = Arc::new(DiskPinStore::new(pins_path));
 
         let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
-            Arc::new(BlindWireVerifier::new("blindwire.io", store));
+            Arc::new(BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store));
 
         let config_tls = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),

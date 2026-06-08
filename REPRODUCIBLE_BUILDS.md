@@ -9,6 +9,19 @@ BlindWire artifacts are designed for bit-for-bit reproducibility. This document 
 
 ## Build Process
 
+Release builds require the official relay's SPKI-SHA256 pin set. Provide one
+current pin and, during key rotation, one next pin as lowercase or uppercase
+64-character hexadecimal values:
+
+```powershell
+$env:BLINDWIRE_OFFICIAL_SPKI_PINS = "<current-64-hex>[,<next-64-hex>]"
+```
+
+The pin set is public release metadata, not a secret. Record it alongside the
+tag and checksums so independent rebuilders use exactly the same input. Release
+compilation fails if the variable is absent, malformed, duplicated, or contains
+more than two pins.
+
 To generate a deterministic release binary:
 
 ```powershell

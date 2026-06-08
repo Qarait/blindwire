@@ -11,7 +11,7 @@
 //!
 //! # Official Server
 //!
-//! `blindwire.io` is hard-pinned via `OFFICIAL_PINS` (two-key rotation: current + next).
+//! `relay.blindwire.io` is hard-pinned via `OFFICIAL_PINS` (current + optional next).
 //! Any cert whose SPKI hash is not in `OFFICIAL_PINS` is rejected immediately.
 //! Additionally the presented cert SAN and validity period are checked.
 //!
@@ -26,16 +26,11 @@ use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// SPKI-SHA256 pins for the official BlindWire signaling relay.
-///
-/// These are **SHA-256 hashes of the SPKI DER** (not the full certificate).
-/// Two slots implement Strategy B key rotation: current + next.
-///
-/// IMPORTANT: Replace placeholder values with real production keys before release.
-pub const OFFICIAL_PINS: &[[u8; 32]] = &[
-    [0x11; 32], // CURRENT_PIN — placeholder
-    [0x22; 32], // NEXT_PIN    — placeholder (for zero-downtime rotation)
-];
+pub use blindwire_core::invite::OFFICIAL_RELAY_HOST;
+
+// Generated from BLINDWIRE_OFFICIAL_SPKI_PINS. Debug builds without configured
+// pins fail closed for the official relay; release builds fail during compilation.
+include!(concat!(env!("OUT_DIR"), "/official_pins.rs"));
 
 // ─── Stable error codes ────────────────────────────────────────────────────────
 
@@ -433,11 +428,18 @@ mod tests {
     // substitute (the store key/value flow is identical regardless of hash fn).
 
     #[test]
+    fn test_official_relay_configuration_has_no_placeholders() {
+        assert_eq!(OFFICIAL_RELAY_HOST, "relay.blindwire.io");
+        assert!(!OFFICIAL_PINS.contains(&[0x11; 32]));
+        assert!(!OFFICIAL_PINS.contains(&[0x22; 32]));
+    }
+
+    #[test]
     fn test_verifier_rejects_official_domain_with_wrong_pin() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let verifier = BlindWireVerifier::new("blindwire.io", Arc::clone(&store));
-        let server = ServerName::from(DnsName::try_from("blindwire.io").unwrap());
+        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
+        let server = ServerName::from(DnsName::try_from(OFFICIAL_RELAY_HOST).unwrap());
         // Any cert whose SPKI-SHA256 ∉ OFFICIAL_PINS → error
         let bad_cert = CertificateDer::from(vec![0xCC; 32]);
         let result = verifier.verify_server_cert(&bad_cert, &[], &server, &[], UnixTime::now());
@@ -454,7 +456,7 @@ mod tests {
     fn test_tofu_pin_then_match_then_change_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier = BlindWireVerifier::new("blindwire.io", Arc::clone(&store));
+        let _verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
 
         let cert_data = vec![0x55u8; 64];
         let cert = CertificateDer::from(cert_data.clone());
@@ -477,7 +479,7 @@ mod tests {
         // Changed cert → identity changed → rejected
         let evil_cert = CertificateDer::from(vec![0xEE; 32]);
         let store2 = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier2 = BlindWireVerifier::new("blindwire.io", store2);
+        let _verifier2 = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store2);
         // Its store has custom-test.io → expected_hash seeded above.
         // The evil cert would hash to something different (SPKI extraction will
         // fall through to General error), so let's just validate the store logic.
@@ -633,7 +635,7 @@ mod tests {
         std::fs::write(&parent_file, b"occupied").unwrap();
 
         let store = Arc::new(DiskPinStore::new(parent_file.join("pins.txt")));
-        let verifier = BlindWireVerifier::new("blindwire.io", store);
+        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store);
         let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
         let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
 

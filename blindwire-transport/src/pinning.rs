@@ -58,6 +58,8 @@ pub enum PinError {
     TlsError(String),
     /// Could not extract SPKI from certificate DER.
     SpkiExtractionFailed,
+    /// Could not durably persist a first-use pin.
+    PinPersistenceFailed(String),
 }
 
 impl std::fmt::Display for PinError {
@@ -74,6 +76,9 @@ impl std::fmt::Display for PinError {
             ),
             PinError::TlsError(s) => write!(f, "TLS error: {s}"),
             PinError::SpkiExtractionFailed => write!(f, "could not extract SPKI from certificate"),
+            PinError::PinPersistenceFailed(s) => {
+                write!(f, "could not persist first-use server pin: {s}")
+            }
         }
     }
 }
@@ -294,7 +299,7 @@ impl ServerCertVerifier for BlindWireVerifier {
 
         // ── 1. Official server (hard-pinned) ─────────────────────────────────
         if host == self.official_domain {
-            if OFFICIAL_PINS.iter().any(|&p| p == pin) {
+            if OFFICIAL_PINS.contains(&pin) {
                 // Pin matched — also validate the SAN covers this hostname.
                 validate_san(end_entity, raw_host)?;
                 return Ok(rustls::client::danger::ServerCertVerified::assertion());
@@ -315,38 +320,45 @@ impl ServerCertVerifier for BlindWireVerifier {
         } else {
             // First-use: validate SAN before pinning, to prevent pinning a cert for the wrong host.
             validate_san(end_entity, raw_host)?;
-            let _ = self.store.save_pin(&host, pin);
+            self.store
+                .save_pin(&host, pin)
+                .map_err(|e| PinError::PinPersistenceFailed(e.to_string()))?;
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -409,6 +421,9 @@ mod tests {
             .contains("identity changed"));
         let e: rustls::Error = PinError::IdentityChanged.into();
         assert!(matches!(e, rustls::Error::General(_)));
+        assert!(PinError::PinPersistenceFailed("disk full".into())
+            .to_string()
+            .contains("disk full"));
     }
 
     // ── Verifier with pre-seeded store (bypasses real SPKI parsing) ───────────
@@ -609,5 +624,21 @@ mod tests {
         let h1 = spki_sha256(&cert).unwrap();
         let h2 = spki_sha256(&cert).unwrap();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_first_use_fails_closed_when_pin_cannot_be_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_file = tmp.path().join("not-a-directory");
+        std::fs::write(&parent_file, b"occupied").unwrap();
+
+        let store = Arc::new(DiskPinStore::new(parent_file.join("pins.txt")));
+        let verifier = BlindWireVerifier::new("blindwire.io", store);
+        let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
+        let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
+
+        let result = verifier.verify_server_cert(&cert, &[], &server, &[], UnixTime::now());
+        let error = result.expect_err("TOFU must fail if the first-use pin cannot be stored");
+        assert!(error.to_string().contains("could not persist"));
     }
 }

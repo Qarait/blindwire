@@ -4,7 +4,7 @@ BlindWire artifacts are designed for bit-for-bit reproducibility. This document 
 
 ## Prerequisites
 
-- **Rust Toolchain**: Pinned to the version in `rust-toolchain.toml` (1.83.0).
+- **Rust Toolchain**: Pinned to the version in `rust-toolchain.toml` (1.88.0).
 - **Environment**: Linux (Ubuntu 22.04 recommended for released binaries) or Windows (11).
 
 ## Build Process

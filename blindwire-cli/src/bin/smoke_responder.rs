@@ -75,11 +75,11 @@ async fn main() {
             process::exit(0);
         }
         Ok(Err(e)) => {
-            eprintln!("[SMOKE] FAIL: {}", e);
+            eprintln!("[SMOKE] FAIL: {e}");
             process::exit(1);
         }
         Err(_elapsed) => {
-            eprintln!("[SMOKE] TIMEOUT after {}s", timeout_secs);
+            eprintln!("[SMOKE] TIMEOUT after {timeout_secs}s");
             process::exit(2);
         }
     }
@@ -88,7 +88,7 @@ async fn main() {
 async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), String> {
     // ── 1. Parse the invite URI ──────────────────────────────────────────────
     let invite =
-        InvitePayload::parse(invite_uri).map_err(|e| format!("invite parse failed: {:?}", e))?;
+        InvitePayload::parse(invite_uri).map_err(|e| format!("invite parse failed: {e:?}"))?;
 
     println!("[SMOKE] Invite parsed");
     println!("[SMOKE]   room     : {}", invite.room);
@@ -108,7 +108,7 @@ async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), S
     let mut token_bytes = [0u8; 32];
     let decoded = URL_SAFE_NO_PAD
         .decode(&invite.token)
-        .map_err(|e| format!("invalid token encoding: {}", e))?;
+        .map_err(|e| format!("invalid token encoding: {e}"))?;
     if decoded.len() != 32 {
         return Err("token must be exactly 32 bytes".to_string());
     }
@@ -125,12 +125,12 @@ async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), S
     println!("[SMOKE] Connecting as Responder...");
     let (mut session, _) = SecureSession::connect(config)
         .await
-        .map_err(|e| format!("connect failed: {:?}", e))?;
+        .map_err(|e| format!("connect failed: {e:?}"))?;
 
     session
         .handshake()
         .await
-        .map_err(|e| format!("handshake failed: {:?}", e))?;
+        .map_err(|e| format!("handshake failed: {e:?}"))?;
 
     println!("[SMOKE] Handshake complete ✓");
 
@@ -146,37 +146,36 @@ async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), S
         "[SMOKE] SAS (verify this matches instance A): {}",
         emojis.join(" ")
     );
-    println!("[SMOKE] Fingerprint: {}", fingerprint_hex);
+    println!("[SMOKE] Fingerprint: {fingerprint_hex}");
 
     // ── 6. Wait for one inbound message from instance A ──────────────────────
     println!("[SMOKE] Waiting for message from instance A...");
     let received = session
         .recv()
         .await
-        .map_err(|e| format!("recv failed: {:?}", e))?;
+        .map_err(|e| format!("recv failed: {e:?}"))?;
 
     let received_text = String::from_utf8_lossy(received.as_bytes()).to_string();
-    println!("[SMOKE] Received: '{}'", received_text);
+    println!("[SMOKE] Received: '{received_text}'");
 
     // Optional: assert the message matches what we expected
     if let Some(ref expected) = expect_msg {
         if &received_text != expected {
             return Err(format!(
-                "message mismatch: expected '{}', got '{}'",
-                expected, received_text
+                "message mismatch: expected '{expected}', got '{received_text}'"
             ));
         }
         println!("[SMOKE] Message content ✓");
     }
 
     // ── 7. Echo back ──────────────────────────────────────────────────────────
-    let echo = format!("echo: {}", received_text);
+    let echo = format!("echo: {received_text}");
     session
         .send_text(&echo)
         .await
-        .map_err(|e| format!("send failed: {:?}", e))?;
+        .map_err(|e| format!("send failed: {e:?}"))?;
 
-    println!("[SMOKE] Echo sent: '{}'", echo);
+    println!("[SMOKE] Echo sent: '{echo}'");
 
     // ── 8. Clean disconnect ───────────────────────────────────────────────────
     session.burn();

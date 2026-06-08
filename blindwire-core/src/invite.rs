@@ -47,12 +47,12 @@ impl fmt::Display for InviteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUriFormat => write!(f, "Invalid URI format"),
-            Self::MissingRequiredField(k) => write!(f, "Missing required field: {}", k),
+            Self::MissingRequiredField(k) => write!(f, "Missing required field: {k}"),
             Self::UnknownOrDuplicateField(k) => {
-                write!(f, "Unknown or duplicate query field: {}", k)
+                write!(f, "Unknown or duplicate query field: {k}")
             }
             Self::InvalidVersion => write!(f, "Invalid or unsupported version (must be v=1)"),
-            Self::OversizedField(k) => write!(f, "Field exceeds max length bounds: {}", k),
+            Self::OversizedField(k) => write!(f, "Field exceeds max length bounds: {k}"),
             Self::InvalidRelayUrl => write!(f, "Relay URL is invalid or not wss://"),
             Self::ExpiredToken => write!(f, "Invite token has expired"),
             Self::CustomRelayRequiresPin => write!(f, "Custom relays require a pinning hash (p=)"),
@@ -62,8 +62,7 @@ impl fmt::Display for InviteError {
             ),
             Self::InvalidEncoding(k) => write!(
                 f,
-                "Field contains invalid characters (must be base64url no-padding): {}",
-                k
+                "Field contains invalid characters (must be base64url no-padding): {k}"
             ),
         }
     }

@@ -11,7 +11,7 @@
 //!
 //! # Official Server
 //!
-//! `relay.blindwire.io` is hard-pinned via `OFFICIAL_PINS` (current + optional next).
+//! `relay.blindwire.net` is hard-pinned via `OFFICIAL_PINS` (current + optional next).
 //! Any cert whose SPKI hash is not in `OFFICIAL_PINS` is rejected immediately.
 //! Additionally the presented cert SAN and validity period are checked.
 //!
@@ -84,6 +84,42 @@ impl From<PinError> for rustls::Error {
     }
 }
 
+/// Errors returned when resetting a persisted custom-relay pin.
+#[derive(Debug)]
+pub enum PinResetError {
+    /// The supplied relay URL is malformed or is not a secure WebSocket URL.
+    InvalidRelayUrl,
+    /// The official relay uses compile-time pins and cannot be reset by a user.
+    OfficialRelay,
+    /// The pin store could not be read or atomically updated.
+    Storage(std::io::Error),
+}
+
+impl std::fmt::Display for PinResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRelayUrl => write!(f, "invalid custom relay URL"),
+            Self::OfficialRelay => write!(f, "the official relay pin cannot be reset"),
+            Self::Storage(error) => write!(f, "could not update the relay pin store: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PinResetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for PinResetError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
 // ─── Pin Store ─────────────────────────────────────────────────────────────────
 
 /// Persistent SPKI pin storage (simple flat file: `"hostname:hex_hash\n"`).
@@ -140,6 +176,45 @@ impl DiskPinStore {
         std::fs::write(&tmp_path, &content)?;
         std::fs::rename(&tmp_path, &self.path)
     }
+
+    /// Atomically remove every persisted pin for one canonicalized hostname.
+    pub fn remove_pin(&self, host: &str) -> std::io::Result<bool> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let content = std::fs::read_to_string(&self.path)?;
+        let mut retained = String::new();
+        let mut removed = false;
+
+        for line in content.lines() {
+            let (stored_host, stored_hex) = line.split_once(':').ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed relay pin store entry",
+                )
+            })?;
+            let mut hash = [0u8; 32];
+            hex::decode_to_slice(stored_hex, &mut hash).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed relay pin hash")
+            })?;
+
+            if stored_host == host {
+                removed = true;
+            } else {
+                retained.push_str(line);
+                retained.push('\n');
+            }
+        }
+
+        if !removed {
+            return Ok(false);
+        }
+
+        let tmp_path = self.path.with_extension("tmp");
+        std::fs::write(&tmp_path, retained)?;
+        std::fs::rename(&tmp_path, &self.path)?;
+        Ok(true)
+    }
 }
 
 // ─── Hostname canonicalization ─────────────────────────────────────────────────
@@ -163,6 +238,27 @@ pub(crate) fn canonicalize_host(host: &str) -> String {
         .unwrap_or(&lower);
     // Then strip trailing FQDN dot
     without_port.trim_end_matches('.').to_owned()
+}
+
+/// Remove a persisted pin for a custom secure-WebSocket relay.
+/// The official relay's compile-time pin policy cannot be reset.
+pub fn reset_server_pin(
+    path: impl AsRef<std::path::Path>,
+    relay_url: &str,
+) -> Result<bool, PinResetError> {
+    let url = url::Url::parse(relay_url).map_err(|_| PinResetError::InvalidRelayUrl)?;
+    if url.scheme() != "wss" {
+        return Err(PinResetError::InvalidRelayUrl);
+    }
+    let host = url.host_str().ok_or(PinResetError::InvalidRelayUrl)?;
+    let host = canonicalize_host(host);
+    if host == OFFICIAL_RELAY_HOST {
+        return Err(PinResetError::OfficialRelay);
+    }
+
+    DiskPinStore::new(path.as_ref().to_path_buf())
+        .remove_pin(&host)
+        .map_err(PinResetError::from)
 }
 
 // ─── SPKI extraction ───────────────────────────────────────────────────────────
@@ -244,14 +340,30 @@ pub struct BlindWireVerifier {
     official_domain: String,
     /// Persistent TOFU pin store for custom servers.
     store: Arc<DiskPinStore>,
+    /// Optional pin delivered in a validated custom-relay invite.
+    expected_pin: Option<[u8; 32]>,
+    /// Standard WebPKI verifier; pinning is applied only after it succeeds.
+    standard_verifier: Arc<dyn ServerCertVerifier>,
 }
 
 impl BlindWireVerifier {
-    pub fn new(official_domain: impl Into<String>, store: Arc<DiskPinStore>) -> Self {
+    pub fn new(
+        official_domain: impl Into<String>,
+        store: Arc<DiskPinStore>,
+        standard_verifier: Arc<dyn ServerCertVerifier>,
+    ) -> Self {
         Self {
             official_domain: official_domain.into(),
             store,
+            expected_pin: None,
+            standard_verifier,
         }
+    }
+
+    /// Require a specific SPKI pin for this connection.
+    pub fn with_expected_pin(mut self, pin: Option<[u8; 32]>) -> Self {
+        self.expected_pin = pin;
+        self
     }
 
     /// Exposed for tests (allows computing match-ready hashes without a real cert).
@@ -274,11 +386,19 @@ impl ServerCertVerifier for BlindWireVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
+        ocsp_response: &[u8],
+        now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.standard_verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+
         let raw_host = match server_name {
             ServerName::DnsName(dns) => dns.as_ref(),
             ServerName::IpAddress(_) => return Err(rustls::Error::UnsupportedNameType),
@@ -301,6 +421,14 @@ impl ServerCertVerifier for BlindWireVerifier {
             } else {
                 return Err(PinError::OfficialPinMismatch.into());
             }
+        }
+
+        if let Some(expected) = self.expected_pin {
+            if expected == pin {
+                validate_san(end_entity, raw_host)?;
+                return Ok(rustls::client::danger::ServerCertVerified::assertion());
+            }
+            return Err(PinError::IdentityChanged.into());
         }
 
         // ── 2. Custom server (Auto-TOFU) ──────────────────────────────────────
@@ -328,12 +456,8 @@ impl ServerCertVerifier for BlindWireVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
+        self.standard_verifier
+            .verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -342,18 +466,12 @@ impl ServerCertVerifier for BlindWireVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
+        self.standard_verifier
+            .verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.standard_verifier.supported_verify_schemes()
     }
 }
 
@@ -361,8 +479,91 @@ impl ServerCertVerifier for BlindWireVerifier {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::uninlined_format_args
+    )]
     use super::*;
     use rustls_pki_types::{CertificateDer, DnsName};
+
+    #[derive(Debug)]
+    struct RejectExpiredVerifier;
+
+    impl ServerCertVerifier for RejectExpiredVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Expired,
+            ))
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Err(rustls::Error::General("unused in this test".into()))
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Err(rustls::Error::General("unused in this test".into()))
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Debug)]
+    struct AcceptCertificateVerifier;
+
+    impl ServerCertVerifier for AcceptCertificateVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            Vec::new()
+        }
+    }
 
     // ── Hostname canonicalization ─────────────────────────────────────────────
 
@@ -429,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_official_relay_configuration_has_no_placeholders() {
-        assert_eq!(OFFICIAL_RELAY_HOST, "relay.blindwire.io");
+        assert_eq!(OFFICIAL_RELAY_HOST, "relay.blindwire.net");
         assert!(!OFFICIAL_PINS.contains(&[0x11; 32]));
         assert!(!OFFICIAL_PINS.contains(&[0x22; 32]));
     }
@@ -438,7 +639,11 @@ mod tests {
     fn test_verifier_rejects_official_domain_with_wrong_pin() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
+        let verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            Arc::clone(&store),
+            Arc::new(AcceptCertificateVerifier),
+        );
         let server = ServerName::from(DnsName::try_from(OFFICIAL_RELAY_HOST).unwrap());
         // Any cert whose SPKI-SHA256 ∉ OFFICIAL_PINS → error
         let bad_cert = CertificateDer::from(vec![0xCC; 32]);
@@ -456,7 +661,11 @@ mod tests {
     fn test_tofu_pin_then_match_then_change_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
+        let _verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            Arc::clone(&store),
+            Arc::new(AcceptCertificateVerifier),
+        );
 
         let cert_data = vec![0x55u8; 64];
         let cert = CertificateDer::from(cert_data.clone());
@@ -479,7 +688,11 @@ mod tests {
         // Changed cert → identity changed → rejected
         let evil_cert = CertificateDer::from(vec![0xEE; 32]);
         let store2 = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier2 = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store2);
+        let _verifier2 = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            store2,
+            Arc::new(AcceptCertificateVerifier),
+        );
         // Its store has custom-test.io → expected_hash seeded above.
         // The evil cert would hash to something different (SPKI extraction will
         // fall through to General error), so let's just validate the store logic.
@@ -635,12 +848,37 @@ mod tests {
         std::fs::write(&parent_file, b"occupied").unwrap();
 
         let store = Arc::new(DiskPinStore::new(parent_file.join("pins.txt")));
-        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store);
+        let verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            store,
+            Arc::new(AcceptCertificateVerifier),
+        );
         let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
         let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
 
         let result = verifier.verify_server_cert(&cert, &[], &server, &[], UnixTime::now());
         let error = result.expect_err("TOFU must fail if the first-use pin cannot be stored");
         assert!(error.to_string().contains("could not persist"));
+    }
+
+    #[test]
+    fn pin_match_does_not_override_expired_certificate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
+        let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
+        let expected_pin = spki_sha256(&cert).unwrap();
+        let verifier =
+            BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store, Arc::new(RejectExpiredVerifier))
+                .with_expected_pin(Some(expected_pin));
+        let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
+
+        let error = verifier
+            .verify_server_cert(&cert, &[], &server, &[], UnixTime::now())
+            .expect_err("ordinary certificate validity must run before pin acceptance");
+
+        assert!(matches!(
+            error,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+        ));
     }
 }

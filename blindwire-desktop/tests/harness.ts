@@ -168,7 +168,10 @@ export async function waitForAppPage(context: any, timeoutMs = 15000) {
     const pages = context.pages();
     for (const p of pages) {
       const url = p.url();
-      if (url && !url.includes('about:blank') && url.includes('tauri.localhost')) {
+      const isPackagedApp = url.includes('tauri.localhost');
+      const isDebugApp = url.startsWith('http://localhost:1420/') ||
+        url.startsWith('http://127.0.0.1:1420/');
+      if (url && !url.includes('about:blank') && (isPackagedApp || isDebugApp)) {
         return p;
       }
     }

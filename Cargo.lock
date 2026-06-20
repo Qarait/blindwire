@@ -446,6 +446,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "url",
  "webpki-roots 0.26.11",
  "zeroize",
 ]

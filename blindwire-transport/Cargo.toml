@@ -20,6 +20,7 @@ futures-util = "0.3"
 
 # Explicit memory zeroization
 zeroize = { version = "1.7", features = ["derive"] }
+url = "2"
 hex = "0.4"
 
 # TLS (for wss:// pinning)

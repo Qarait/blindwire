@@ -20,7 +20,6 @@ pub fn run() {
             commands::join_room,
             commands::get_room_snapshot,
             commands::confirm_peer_verified,
-            commands::trust_new_server_identity,
             commands::reset_server_pin,
             commands::send_message,
             commands::leave_room,

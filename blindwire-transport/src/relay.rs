@@ -75,24 +75,38 @@ impl RelayTransport {
         });
         let store = Arc::new(DiskPinStore::new(pins_path));
 
-        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
-            Arc::new(BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store));
+        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let standard_verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::clone(&crypto_provider),
+        )
+        .build()
+        .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
+        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(
+            BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store, standard_verifier)
+                .with_expected_pin(config.expected_server_pin),
+        );
 
-        let config_tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        let config_tls = rustls::ClientConfig::builder_with_provider(crypto_provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
 
         let connector = Connector::Rustls(Arc::new(config_tls));
 
         // Establish WebSocket connection
         let (ws, _response) = connect_async_tls_with_config(url, None, false, Some(connector))
             .await
-            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
+            .map_err(|error| match error {
+                tokio_tungstenite::tungstenite::Error::Tls(_) => {
+                    TransportError::TlsValidationFailed
+                }
+                other => TransportError::ConnectionFailed(other.to_string()),
+            })?;
 
         let mut transport = Self { ws, session_id };
 

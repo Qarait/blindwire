@@ -22,6 +22,30 @@ use crate::relay::RelayTransport;
 /// This is a hard protocol invariant (4000 bytes). This limit is chosen to ensure
 /// that any message (including framing and AEAD overhead) fits within a single
 /// 4096-byte MTU-friendly wire frame. Increasing this limit would require
+fn validate_signaling_url(config: &TransportConfig) -> Result<(), TransportError> {
+    let url = url::Url::parse(&config.signaling_url)
+        .map_err(|_| TransportError::ConnectionFailed("invalid signaling server URL".into()))?;
+
+    if url.scheme() == "wss" {
+        return Ok(());
+    }
+
+    let is_loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+
+    if cfg!(debug_assertions) && config.insecure_dev && url.scheme() == "ws" && is_loopback {
+        return Ok(());
+    }
+
+    Err(TransportError::ConnectionFailed(
+        "wss:// required; ws:// is limited to localhost debug builds".into(),
+    ))
+}
+
 /// re-evaluating the framing layer and potential fragmentation risks.
 const MAX_PLAINTEXT_SIZE: usize = 4000;
 
@@ -65,12 +89,7 @@ impl SecureSession {
     pub async fn connect(
         config: TransportConfig,
     ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
-        // Validate URL scheme
-        if !config.insecure_dev && !config.signaling_url.starts_with("wss://") {
-            return Err(TransportError::ConnectionFailed(
-                "wss:// required (use insecure_dev for local testing)".into(),
-            ));
-        }
+        validate_signaling_url(&config)?;
 
         // Connect to signaling server
         let (relay, token) = RelayTransport::connect(&config).await?;
@@ -292,6 +311,7 @@ impl SecureSession {
 impl Drop for SecureSession {
     fn drop(&mut self) {
         // Defensive burn if not already terminated
+
         self.do_burn();
     }
 }
@@ -311,5 +331,39 @@ mod tests {
     fn test_validation_length() {
         let err = TransportError::MessageTooLong;
         assert!(err.to_string().contains("4000"));
+    }
+    #[test]
+    fn secure_websocket_urls_are_accepted() {
+        let config = TransportConfig::initiator("wss://relay.blindwire.net", [0; 32]);
+        assert!(validate_signaling_url(&config).is_ok());
+    }
+
+    #[test]
+    fn insecure_remote_websocket_is_rejected_even_when_requested() {
+        let config =
+            TransportConfig::initiator("ws://example.com:8080", [0; 32]).with_insecure_dev();
+        assert!(validate_signaling_url(&config).is_err());
+    }
+
+    #[test]
+    fn insecure_local_websocket_depends_on_debug_build() {
+        for url in [
+            "ws://localhost:8080",
+            "ws://127.0.0.1:8080",
+            "ws://[::1]:8080",
+        ] {
+            let config = TransportConfig::initiator(url, [0; 32]).with_insecure_dev();
+            if cfg!(debug_assertions) {
+                assert!(validate_signaling_url(&config).is_ok(), "{url}");
+            } else {
+                assert!(validate_signaling_url(&config).is_err(), "{url}");
+            }
+        }
+    }
+
+    #[test]
+    fn insecure_local_websocket_requires_explicit_opt_in() {
+        let config = TransportConfig::initiator("ws://127.0.0.1:8080", [0; 32]);
+        assert!(validate_signaling_url(&config).is_err());
     }
 }

@@ -71,6 +71,11 @@ impl From<TransportError> for AppError {
                 "Could not reach the relay server. Please check your connection.",
                 true,
             ),
+            TransportError::TlsValidationFailed => Self::new(
+                "RELAY_IDENTITY_INVALID",
+                "The relay's certificate or security identity could not be verified.",
+                false,
+            ),
             TransportError::HandshakeFailed => Self::new(
                 "HANDSHAKE_FAILED",
                 "The secure handshake failed. The server identity may have changed.",

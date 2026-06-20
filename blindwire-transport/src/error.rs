@@ -11,6 +11,8 @@ pub enum TransportError {
     // --- Connection & Setup ---
     /// Failed to establish WebSocket connection.
     ConnectionFailed(String),
+    /// TLS certificate or relay identity validation failed.
+    TlsValidationFailed,
     /// Noise handshake failed.
     HandshakeFailed,
     /// Operation timed out.
@@ -47,6 +49,7 @@ impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
+            Self::TlsValidationFailed => write!(f, "TLS validation failed"),
             Self::HandshakeFailed => write!(f, "handshake failed"),
             Self::Protocol(e) => write!(f, "protocol error: {e:?}"),
             Self::SessionTerminated => write!(f, "session terminated"),

@@ -72,8 +72,9 @@ impl std::error::Error for InviteError {}
 
 // Official relay canonical address
 /// Canonical hostname of the official BlindWire signaling relay.
-pub const OFFICIAL_RELAY_HOST: &str = "relay.blindwire.io";
-const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.io";
+pub const OFFICIAL_RELAY_HOST: &str = "relay.blindwire.net";
+/// Canonical secure WebSocket URL of the official BlindWire relay.
+pub const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.net";
 
 impl InvitePayload {
     /// Parses a raw blindwire:// deep link or QR string into a validated payload.
@@ -262,8 +263,7 @@ fn is_base64url_unpadded(s: &str) -> bool {
 }
 
 fn matches_official_relay(url: &Url) -> bool {
-    // Official is wss://relay.blindwire.io (with or without internal ports/paths)
-    // To be strict, domain must be relay.blindwire.io exactly.
+    // The official relay hostname must match exactly.
     url.domain() == Some(OFFICIAL_RELAY_HOST)
 }
 
@@ -294,7 +294,7 @@ mod tests {
 
         assert_eq!(payload.room, "room123");
         assert_eq!(payload.relay_pin, None);
-        assert_eq!(payload.relay_url.as_str(), "wss://relay.blindwire.io/");
+        assert_eq!(payload.relay_url.as_str(), "wss://relay.blindwire.net/");
     }
 
     #[test]
@@ -350,10 +350,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64
             - (10 * 60 * 1000);
-        let uri = format!(
-            "blindwire://join?v=1&r=room1&t=token1234567890123&e={}",
-            past_exp
-        );
+        let uri = format!("blindwire://join?v=1&r=room1&t=token1234567890123&e={past_exp}");
         assert_eq!(InvitePayload::parse(&uri), Err(InviteError::ExpiredToken));
     }
 
@@ -384,7 +381,7 @@ mod tests {
 
         // Injecting a pin for the explicit official relay
         let uri_explicit = format!(
-            "{}&u=wss://relay.blindwire.io&p={}",
+            "{}&u=wss://relay.blindwire.net&p={}",
             base_valid_uri(),
             "A".repeat(43)
         );

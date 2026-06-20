@@ -49,7 +49,7 @@ test('packaged app smoke test: valid join loop', async () => {
 
     // 2. Inject a valid mock invite link.
     //    Token must be 43 chars of base64url (decodes to 32 bytes) to pass Rust validation.
-    //    Relay defaults to wss://relay.blindwire.io (official), so no relay needed for parse.
+    //    Relay defaults to wss://relay.blindwire.net (official), so no relay needed for parse.
     const fakeToken = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; // 43 chars, decodes to 32 zero-bytes
     const input = page.locator('input[placeholder="Paste blindwire:// link"]');
     await input.fill(`blindwire://join?v=1&r=testroom&t=${fakeToken}&e=9999999999999`);

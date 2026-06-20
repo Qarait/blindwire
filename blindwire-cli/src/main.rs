@@ -865,6 +865,7 @@ impl App {
     }
 }
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -959,8 +960,8 @@ mod tests {
 
         {
             let s = store.lock().unwrap();
-            assert!(s.pending_pins.get("wss://test.com:443").is_some());
-            assert!(s.pins.get("wss://test.com:443").is_none());
+            assert!(s.pending_pins.contains_key("wss://test.com:443"));
+            assert!(!s.pins.contains_key("wss://test.com:443"));
         }
 
         // 2. Second time - same cert now in pending - user confirmed, promote to permanent
@@ -975,8 +976,8 @@ mod tests {
 
         {
             let s = store.lock().unwrap();
-            assert!(s.pins.get("wss://test.com:443").is_some());
-            assert!(s.pending_pins.get("wss://test.com:443").is_none());
+            assert!(s.pins.contains_key("wss://test.com:443"));
+            assert!(!s.pending_pins.contains_key("wss://test.com:443"));
         }
 
         // 3. Third time - same cert - OK (already pinned)

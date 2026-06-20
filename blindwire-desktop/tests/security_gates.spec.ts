@@ -13,6 +13,36 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const workspaceRoot = path.resolve(__dirname, '..', '..');
 
+const readWorkspaceSource = (relativePath: string) =>
+  fs.readFileSync(path.join(workspaceRoot, relativePath), 'utf8');
+
+test('static release sources contain no trust bypass or sensitive logging', () => {
+  const appSource = readWorkspaceSource('blindwire-desktop/src/App.tsx');
+  const commandSource = readWorkspaceSource('blindwire-desktop/src-tauri/src/commands.rs');
+  const stateSource = readWorkspaceSource('blindwire-desktop/src-tauri/src/state.rs');
+  const libSource = readWorkspaceSource('blindwire-desktop/src-tauri/src/lib.rs');
+  const tauriConfig = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/src-tauri/tauri.conf.json'),
+  );
+  const releaseSources = [appSource, commandSource, stateSource, libSource].join('\n');
+
+  expect(releaseSources).not.toContain('Trust New Identity');
+  expect(releaseSources).not.toContain('trust_new_server_identity');
+  expect(releaseSources).not.toContain('pending_identity_changes');
+  expect(appSource).not.toMatch(/console\.(?:log|debug|info|warn|error)/);
+  expect(commandSource).not.toMatch(/log::(?:trace|debug|info|warn|error)!/);
+
+  expect(appSource).toContain('<QRCodeSVG');
+  expect(appSource).toContain('value={view.info.qr_string}');
+  expect(appSource).not.toContain('qr_string.slice(');
+
+  const csp = tauriConfig.app.security.csp;
+  expect(typeof csp).toBe('string');
+  expect(csp).toContain("default-src 'self'");
+  expect(csp).toContain("script-src 'self'");
+  expect(csp).toContain("img-src 'self' data:");
+  expect(csp).not.toContain('*');
+});
 const runResponder = (exe: string, uri: string, relayUrl?: string) => {
     return new Promise<{code: number | null, output: string}>((resolve) => {
       console.log(`[RESPONDER] Joining with URI: ${uri}`);
@@ -128,7 +158,7 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         expect(successCount).toBe(1);
         expect(failureCount).toBe(1);
         const failedRes = res1.code !== 0 ? res1 : res2;
-        expect(failedRes.output).toContain('UnexpectedResponse(4)');
+        expect(failedRes.output).toContain('UnexpectedResponse(1)');
 
         await browser.close();
     } finally {

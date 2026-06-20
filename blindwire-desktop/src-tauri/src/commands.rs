@@ -1,5 +1,8 @@
 use crate::error::AppError;
-use crate::state::AppState;
+use crate::state::{
+    transition_room_snapshot, AppState, InviteAttempt, InviteAttemptError, RoomPhase, RoomSnapshot,
+    VerificationState,
+};
 use blindwire_core::invite::InvitePayload;
 use blindwire_core::sas;
 use blindwire_transport::{SecureSession, TransportConfig, TransportError};
@@ -32,12 +35,6 @@ pub struct RoomInfo {
     pub invite_uri: String,
     pub qr_string: String,
     pub room_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoomSnapshot {
-    pub connected: bool,
-    pub peer_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +72,24 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(debug_assertions)]
+pub(crate) fn default_relay_url() -> &'static str {
+    "ws://127.0.0.1:8080"
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn default_relay_url() -> &'static str {
+    blindwire_core::invite::OFFICIAL_RELAY_URL
+}
+
+fn initiator_config(relay_url: String, session_id: [u8; 32]) -> TransportConfig {
+    let config = TransportConfig::initiator(relay_url, session_id);
+    #[cfg(debug_assertions)]
+    return config.with_insecure_dev();
+    #[cfg(not(debug_assertions))]
+    config
+}
+
 /// Generate a cryptographically random base64url string of `n` bytes.
 fn rand_base64url(n: usize) -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -83,6 +98,16 @@ fn rand_base64url(n: usize) -> String {
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
+pub(crate) fn finalize_invite_attempt(
+    attempt: InviteAttempt,
+    retryable: bool,
+) -> Result<(), InviteAttemptError> {
+    if retryable {
+        attempt.release()
+    } else {
+        attempt.consume()
+    }
+}
 /// Spawn the session task that multiplexes sending and receiving.
 /// Returns the JoinHandle so callers can abort it on session replacement.
 #[allow(clippy::too_many_arguments)]
@@ -96,14 +121,36 @@ fn spawn_session_task(
     session_tx_slot: std::sync::Arc<
         tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<SessionCmd>>>,
     >,
-    session_id: [u8; 32], // Pass session ID to emit verification state
+    room_snapshot: std::sync::Arc<std::sync::RwLock<RoomSnapshot>>,
+    room: String,
+    session_id: [u8; 32],
+    invite_attempt: Option<InviteAttempt>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
+        let mut invite_attempt = invite_attempt;
+
         // Complete handshake first (blocks for initiator until responder joins)
         if let Err(e) = session.handshake().await {
-            log::error!("Handshake failed: {e:?}");
             let err = AppError::from(e);
-            let _ = app_handle.emit("join_failed", err);
+            if let Some(attempt) = invite_attempt.take() {
+                let _ = finalize_invite_attempt(attempt, err.retryable);
+            }
+            let phase = if err.retryable {
+                RoomPhase::Idle
+            } else {
+                RoomPhase::FatalError
+            };
+            if let Some(snapshot) = transition_room_snapshot(
+                &room_snapshot,
+                &current_generation,
+                my_generation,
+                phase,
+                Some(room.clone()),
+                None,
+                Some(err),
+            ) {
+                emit_room_snapshot(&app_handle, &snapshot);
+            }
             // Cleanup
             clear_flag.store(false, Ordering::SeqCst);
             let mut guard = session_tx_slot.lock().await;
@@ -111,8 +158,22 @@ fn spawn_session_task(
             return;
         }
 
-        // Handshake complete, emit verification state
-        emit_verification_state(&session, &session_id, &app_handle);
+        if let Some(attempt) = invite_attempt.take() {
+            let _ = finalize_invite_attempt(attempt, false);
+        }
+
+        let verification = build_verification_state(&session, &session_id);
+        if let Some(snapshot) = transition_room_snapshot(
+            &room_snapshot,
+            &current_generation,
+            my_generation,
+            RoomPhase::Verifying,
+            Some(room.clone()),
+            Some(verification),
+            None,
+        ) {
+            emit_room_snapshot(&app_handle, &snapshot);
+        }
 
         loop {
             // Belt: exit if newer session started
@@ -134,7 +195,17 @@ fn spawn_session_task(
                                 Err(e) => {
                                     let err = AppError::from(e);
                                     let _ = ack_tx.send(Err(err.clone()));
-                                    let _ = app_handle.emit("join_failed", err);
+                                    if let Some(snapshot) = transition_room_snapshot(
+                                        &room_snapshot,
+                                        &current_generation,
+                                        my_generation,
+                                        RoomPhase::FatalError,
+                                        Some(room.clone()),
+                                        None,
+                                        Some(err),
+                                    ) {
+                                        emit_room_snapshot(&app_handle, &snapshot);
+                                    }
                                     break;
                                 }
                             }
@@ -158,20 +229,38 @@ fn spawn_session_task(
                             let _ = app_handle.emit("message_received", MsgEvent { text, timestamp: now_ms() });
                         }
                         Err(TransportError::SessionTerminated) | Err(TransportError::PeerDisconnected) => {
-                            log::warn!("Session ended gracefully or peer disconnected. Generation: {my_generation}");
                             clear_flag.store(false, Ordering::SeqCst);
                             let mut guard = session_tx_slot.lock().await;
                             *guard = None;
-                            let _ = app_handle.emit("room_state_changed", serde_json::json!({ "connected": false, "reason": "PEER_DISCONNECTED" }));
+                            if let Some(snapshot) = transition_room_snapshot(
+                                &room_snapshot,
+                                &current_generation,
+                                my_generation,
+                                RoomPhase::PeerDisconnected,
+                                Some(room.clone()),
+                                None,
+                                None,
+                            ) {
+                                emit_room_snapshot(&app_handle, &snapshot);
+                            }
                             break;
                         }
                         Err(e) => {
-                            log::error!("Sessionrecv() error: {e:?}. Generation: {my_generation}");
                             clear_flag.store(false, Ordering::SeqCst);
                             let mut guard = session_tx_slot.lock().await;
                             *guard = None;
                             let err: AppError = AppError::from(e);
-                            let _ = app_handle.emit("join_failed", err);
+                            if let Some(snapshot) = transition_room_snapshot(
+                                &room_snapshot,
+                                &current_generation,
+                                my_generation,
+                                RoomPhase::FatalError,
+                                Some(room.clone()),
+                                None,
+                                Some(err),
+                            ) {
+                                emit_room_snapshot(&app_handle, &snapshot);
+                            }
                             break;
                         }
                     }
@@ -181,42 +270,41 @@ fn spawn_session_task(
     })
 }
 
-/// After a successful handshake, emit the real verification state.
-/// Uses session.fingerprint() (16 hex chars) as the SAS shared_secret input,
-/// and the session_id bytes as the salt — matching the core sas::generate() contract.
-fn emit_verification_state(
-    session: &SecureSession,
-    session_id: &[u8; 32],
-    app_handle: &tauri::AppHandle,
-) {
+/// Build the peer-verification details after a successful Noise handshake.
+fn build_verification_state(session: &SecureSession, session_id: &[u8; 32]) -> VerificationState {
     let fingerprint_hex = session.fingerprint().unwrap_or_default();
-
-    // Decode the 16-char hex fingerprint into 8 bytes, zero-pad to [u8;32] for sas::generate.
     let mut shared_secret = [0u8; 32];
     if let Ok(bytes) = hex::decode(&fingerprint_hex) {
         let len = bytes.len().min(32);
         shared_secret[..len].copy_from_slice(&bytes[..len]);
     }
 
-    let emojis = sas::generate(&shared_secret, session_id);
-
-    #[derive(Serialize, Clone)]
-    struct VerificationState {
-        identicon_seed: String,
-        emojis: Vec<String>,
-        verified: bool,
+    VerificationState {
+        identicon_seed: fingerprint_hex,
+        emojis: sas::generate(&shared_secret, session_id),
+        verified: false,
     }
-
-    let _ = app_handle.emit(
-        "verification_state_changed",
-        VerificationState {
-            identicon_seed: fingerprint_hex,
-            emojis,
-            verified: false,
-        },
-    );
 }
 
+fn emit_room_snapshot(app_handle: &tauri::AppHandle, snapshot: &RoomSnapshot) {
+    let _ = app_handle.emit("room_state_changed", snapshot);
+}
+
+fn emit_room_error(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+    generation: u64,
+    error: AppError,
+) {
+    let phase = if error.retryable {
+        RoomPhase::Idle
+    } else {
+        RoomPhase::FatalError
+    };
+    if let Some(snapshot) = state.transition_room_with(generation, phase, None, None, Some(error)) {
+        emit_room_snapshot(app_handle, &snapshot);
+    }
+}
 // ────────────────────────────────────────────
 // Tauri Commands
 // ────────────────────────────────────────────
@@ -272,61 +360,51 @@ pub async fn create_room(
 
     // 2. Increment generation, begin session
     let my_generation = state.begin_session();
+    emit_room_snapshot(&app_handle, &state.room_snapshot());
 
     // 3. Mint a random room ID (16 bytes → 22-char base64url)
     let room_id = rand_base64url(16);
     let session_id = session_id_from_room(&room_id);
 
-    log::info!("entering create_room");
-
     // Allow overriding the dev relay URL via env var for testing
-    let relay_url = std::env::var("BLINDWIRE_RELAY_URL").unwrap_or_else(|_| {
-        let fallback = "ws://127.0.0.1:8080".to_string();
-        log::warn!("BLINDWIRE_RELAY_URL is missing, using fallback: {fallback}");
-        fallback
-    });
-    log::info!("exact relay URL being used: {relay_url}");
+    let relay_url =
+        std::env::var("BLINDWIRE_RELAY_URL").unwrap_or_else(|_| default_relay_url().to_string());
 
     // 4. Connect as Initiator and await server-minted token
-    let config = TransportConfig::initiator(relay_url.clone(), session_id).with_insecure_dev();
-
-    log::info!("before connect");
+    let config = initiator_config(relay_url.clone(), session_id);
 
     let connect_future = SecureSession::connect(config);
     let connect_result =
         tokio::time::timeout(std::time::Duration::from_secs(10), connect_future).await;
 
     let (session, server_token) = match connect_result {
-        Ok(Ok(success)) => {
-            log::info!("connect success");
-            success
-        }
+        Ok(Ok(success)) => success,
         Ok(Err(e)) => {
-            log::error!("connect failure: {e:?}");
-            return Err(AppError::from(e));
+            let error = AppError::from(e);
+            emit_room_error(&state, &app_handle, my_generation, error.clone());
+            return Err(error);
         }
         Err(_) => {
-            log::error!("connect failure: Timeout after 10s");
-            return Err(AppError::new(
+            let error = AppError::new(
                 "RELAY_UNREACHABLE",
                 "Timeout connecting to relay server.",
                 true,
-            ));
+            );
+            emit_room_error(&state, &app_handle, my_generation, error.clone());
+            return Err(error);
         }
     };
 
     let token_raw = match server_token {
-        Some(t) => {
-            log::info!("token mint success");
-            t
-        }
+        Some(t) => t,
         None => {
-            log::error!("token mint failure");
-            return Err(AppError::new(
+            let error = AppError::new(
                 "PROTOCOL_ERROR",
                 "Server did not mint an invitation token.",
-                true,
-            ));
+                false,
+            );
+            emit_room_error(&state, &app_handle, my_generation, error.clone());
+            return Err(error);
         }
     };
 
@@ -343,6 +421,7 @@ pub async fn create_room(
     let session_tx_slot = state.session_tx.clone();
     let pv_arc = state.peer_verified.clone();
     let gen_arc = state.session_generation.clone();
+    let room_snapshot = state.room_snapshot.clone();
     let handle_slot = state.recv_loop_handle.clone();
     let sid = session_id;
 
@@ -361,7 +440,10 @@ pub async fn create_room(
         my_generation,
         gen_arc,
         session_tx_slot,
+        room_snapshot,
+        room_id.clone(),
         sid,
+        None,
     );
     if let Ok(mut h) = handle_slot.lock() {
         *h = Some(handle);
@@ -382,7 +464,6 @@ pub async fn join_room(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    // 1. Reject if already in a session
     if state.has_active_session() {
         return Err(AppError::new(
             "SESSION_ACTIVE",
@@ -391,61 +472,127 @@ pub async fn join_room(
         ));
     }
 
-    // 2. Consume the Rust-side invite payload — JS cannot forge this
-    let invite = state.consume_invite(&invite_handle).ok_or_else(|| {
-        AppError::new(
-            "INVITE_INVALID",
-            "Invite handle is invalid, expired, or already used.",
-            false,
-        )
-    })?;
+    let invite_attempt = match state.begin_invite_attempt(&invite_handle) {
+        Ok(attempt) => attempt,
+        Err(InviteAttemptError::InProgress) => {
+            return Err(AppError::new(
+                "JOIN_IN_PROGRESS",
+                "This invite is already being used to connect.",
+                false,
+            ));
+        }
+        Err(InviteAttemptError::Missing | InviteAttemptError::Stale) => {
+            return Err(AppError::new(
+                "INVITE_INVALID",
+                "Invite handle is invalid, expired, or already used.",
+                false,
+            ));
+        }
+    };
+    let invite = invite_attempt.payload.clone();
 
-    // 3. Extract token and decode from base64url
+    if now_ms() > invite.exp.saturating_add(5 * 60 * 1000) {
+        let _ = finalize_invite_attempt(invite_attempt, false);
+        return Err(AppError::new(
+            "INVITE_EXPIRED",
+            "This invite link has expired.",
+            false,
+        ));
+    }
+
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    let mut token_bytes = [0u8; 32];
-    let decoded = URL_SAFE_NO_PAD
-        .decode(&invite.token)
-        .map_err(|_| AppError::new("INVITE_INVALID", "Malformed token encoding.", false))?;
+    let decoded = match URL_SAFE_NO_PAD.decode(&invite.token) {
+        Ok(decoded) => decoded,
+        Err(_) => {
+            let _ = finalize_invite_attempt(invite_attempt, false);
+            return Err(AppError::new(
+                "INVITE_INVALID",
+                "Malformed token encoding.",
+                false,
+            ));
+        }
+    };
     if decoded.len() != 32 {
+        let _ = finalize_invite_attempt(invite_attempt, false);
         return Err(AppError::new(
             "INVITE_INVALID",
             "Token has incorrect length.",
             false,
         ));
     }
+    let mut token_bytes = [0u8; 32];
     token_bytes.copy_from_slice(&decoded);
-
-    // 4. Reset state and bump generation
-    let my_generation = state.begin_session();
 
     let session_id = session_id_from_room(&invite.room);
     let relay_url = invite.relay_url.to_string();
-
-    // For dev/local: if URL is ws:// allow insecure
     let is_insecure = relay_url.starts_with("ws://");
     let mut config = TransportConfig::responder(relay_url, session_id, token_bytes);
     if is_insecure {
         config = config.with_insecure_dev();
     }
 
-    // Set pins path for TOFU persistence (app data dir)
+    if let Some(encoded_pin) = invite.relay_pin.as_deref() {
+        let decoded_pin = match URL_SAFE_NO_PAD.decode(encoded_pin) {
+            Ok(pin) => pin,
+            Err(_) => {
+                let _ = finalize_invite_attempt(invite_attempt, false);
+                return Err(AppError::new(
+                    "INVITE_INVALID",
+                    "Malformed relay pin.",
+                    false,
+                ));
+            }
+        };
+        let pin: [u8; 32] = match decoded_pin.try_into() {
+            Ok(pin) => pin,
+            Err(_) => {
+                let _ = finalize_invite_attempt(invite_attempt, false);
+                return Err(AppError::new(
+                    "INVITE_INVALID",
+                    "Malformed relay pin.",
+                    false,
+                ));
+            }
+        };
+        config = config.with_server_pin(pin);
+    }
+
     if let Ok(app_dir) = tauri::Manager::path(&app_handle).app_data_dir() {
         config = config.with_pins_path(app_dir.join("pins.txt"));
     }
 
-    log::info!("Starting join flow for room: {}", invite.room);
-
+    let my_generation = state.begin_session();
+    emit_room_snapshot(&app_handle, &state.room_snapshot());
     let session_tx_slot = state.session_tx.clone();
     let pv_arc = state.peer_verified.clone();
     let gen_arc = state.session_generation.clone();
+    let room_snapshot = state.room_snapshot.clone();
+    let room = invite.room.clone();
     let handle_slot = state.recv_loop_handle.clone();
 
     tauri::async_runtime::spawn(async move {
         let session = match SecureSession::connect(config).await {
-            Ok((s, _)) => s,
-            Err(e) => {
-                let err: AppError = AppError::from(e);
-                let _ = app_handle.emit("join_failed", err);
+            Ok((session, _)) => session,
+            Err(error) => {
+                let error = AppError::from(error);
+                let retryable = error.retryable;
+                let _ = finalize_invite_attempt(invite_attempt, retryable);
+                let phase = if retryable {
+                    RoomPhase::Idle
+                } else {
+                    RoomPhase::FatalError
+                };
+                if let Some(snapshot) = transition_room_snapshot(
+                    &room_snapshot,
+                    &gen_arc,
+                    my_generation,
+                    phase,
+                    Some(room.clone()),
+                    None,
+                    Some(error),
+                ) {
+                    emit_room_snapshot(&app_handle, &snapshot);
+                }
                 return;
             }
         };
@@ -464,23 +611,22 @@ pub async fn join_room(
             my_generation,
             gen_arc,
             session_tx_slot,
+            room_snapshot,
+            room,
             session_id,
+            Some(invite_attempt),
         );
-        if let Ok(mut h) = handle_slot.lock() {
-            *h = Some(handle);
+        if let Ok(mut slot) = handle_slot.lock() {
+            *slot = Some(handle);
         }
     });
 
     Ok(())
 }
-
 /// Get the current room state (for UI recovery after reload).
 #[tauri::command]
 pub async fn get_room_snapshot(state: State<'_, AppState>) -> Result<RoomSnapshot, AppError> {
-    Ok(RoomSnapshot {
-        connected: state.has_active_session(),
-        peer_verified: state.peer_verified.load(Ordering::SeqCst),
-    })
+    Ok(state.room_snapshot())
 }
 
 /// Mark the peer as verified (user confirmed the SAS match).
@@ -498,47 +644,60 @@ pub async fn confirm_peer_verified(
         ));
     }
 
-    log::debug!(
-        "confirm_peer_verified: active={}, peer_verified_before={}",
-        state.has_active_session(),
-        state.peer_verified.load(Ordering::SeqCst),
-    );
-
     state.peer_verified.store(true, Ordering::SeqCst);
-
-    let _ = app_handle.emit(
-        "room_state_changed",
-        serde_json::json!({
-            "connected": true,
-            "peer_verified": true
-        }),
-    );
+    let generation = state.session_generation.load(Ordering::SeqCst);
+    let snapshot = state
+        .transition_room_with(generation, RoomPhase::Active, None, None, None)
+        .ok_or_else(|| {
+            AppError::new("SESSION_NOT_ACTIVE", "No active session to verify.", false)
+        })?;
+    emit_room_snapshot(&app_handle, &snapshot);
 
     Ok(())
 }
 
-/// Trust a new server identity after an observed pin change.
-#[tauri::command]
-pub async fn trust_new_server_identity(
-    change_id: String,
-    state: State<'_, AppState>,
+pub(crate) fn reset_server_pin_at_path(
+    path: impl AsRef<std::path::Path>,
+    relay: &str,
 ) -> Result<(), AppError> {
-    if !state.consume_identity_change(&change_id) {
-        return Err(AppError::new(
-            "STALE_IDENTITY_CHANGE",
-            "This identity prompt is no longer valid.",
+    match blindwire_transport::reset_server_pin(path, relay) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AppError::new(
+            "PIN_NOT_FOUND",
+            "No stored pin exists for this custom relay.",
             false,
-        ));
+        )),
+        Err(blindwire_transport::PinResetError::OfficialRelay) => Err(AppError::new(
+            "PIN_RESET_FORBIDDEN",
+            "The official relay's security pin cannot be reset.",
+            false,
+        )),
+        Err(blindwire_transport::PinResetError::InvalidRelayUrl) => Err(AppError::new(
+            "PIN_RESET_INVALID",
+            "This custom relay address is invalid.",
+            false,
+        )),
+        Err(blindwire_transport::PinResetError::Storage(_)) => Err(AppError::new(
+            "PIN_STORE_FAILED",
+            "The relay pin store could not be updated.",
+            false,
+        )),
     }
-    Ok(())
 }
 
-/// Reset the stored TOFU pin for a relay (used in Settings).
+/// Reset the stored TOFU pin for a custom relay (used in Settings).
 #[tauri::command]
-pub async fn reset_server_pin(relay: String, _state: State<'_, AppState>) -> Result<(), AppError> {
-    log::info!("Pin reset requested for: {relay}");
-    // TODO: call DiskPinStore::remove(relay) — requires exposing that API
-    Ok(())
+pub async fn reset_server_pin(relay: String, app_handle: tauri::AppHandle) -> Result<(), AppError> {
+    let app_dir = tauri::Manager::path(&app_handle)
+        .app_data_dir()
+        .map_err(|_| {
+            AppError::new(
+                "PIN_STORE_FAILED",
+                "The relay pin store could not be opened.",
+                false,
+            )
+        })?;
+    reset_server_pin_at_path(app_dir.join("pins.txt"), &relay)
 }
 
 /// Send an encrypted message over the active session.
@@ -548,13 +707,6 @@ pub async fn send_message(
     text: String,
     state: State<'_, AppState>,
 ) -> Result<MessageAck, AppError> {
-    log::debug!(
-        "send_message called: text_len={}, peer_verified={}, has_active_session={}",
-        text.len(),
-        state.peer_verified.load(Ordering::SeqCst),
-        state.has_active_session()
-    );
-
     // Block if not verified
     if !state.peer_verified.load(Ordering::SeqCst) {
         return Err(AppError::new(
@@ -579,7 +731,6 @@ pub async fn send_message(
     let result = oneshot_rx
         .await
         .map_err(|_| AppError::new("SESSION_NOT_ACTIVE", "Response channel dropped.", false))?;
-    log::info!("send_message dispatch result: {result:?}");
     result
 }
 
@@ -599,11 +750,7 @@ pub async fn leave_room(
     }
 
     state.clear_session_state();
-
-    let _ = app_handle.emit(
-        "room_state_changed",
-        serde_json::json!({ "connected": false }),
-    );
+    emit_room_snapshot(&app_handle, &state.room_snapshot());
 
     Ok(())
 }
@@ -619,7 +766,6 @@ pub async fn frontend_ready(
 
     let mut pending_lock = state.pending_deep_link.lock().await;
     if let Some(uri) = pending_lock.take() {
-        log::info!("Dispatching queued deep link: {uri}");
         let _ = app_handle.emit("blindwire-deep-link", uri);
     }
 

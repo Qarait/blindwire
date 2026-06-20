@@ -1,14 +1,14 @@
 # Official Relay Deployment
 
 This directory deploys `blindwire-server` behind Nginx at
-`wss://relay.blindwire.io`.
+`wss://relay.blindwire.net`.
 
 ## Target
 
 - Ubuntu 24.04 LTS VPS
 - At least 1 vCPU, 1 GB RAM, and a public IPv4 address
 - Cloud firewall allowing TCP 22, 80, and 443
-- `relay.blindwire.io` A record pointing to the VPS
+- `relay.blindwire.net` A record pointing to the VPS
 - Optional AAAA record only when IPv6 is configured and reachable
 
 The relay process binds only to `127.0.0.1:8080`. Nginx terminates TLS and
@@ -34,7 +34,7 @@ sudo deploy/scripts/install-relay.sh \
 
 The installer:
 
-1. Refuses to continue until `relay.blindwire.io` resolves.
+1. Refuses to continue until `relay.blindwire.net` resolves.
 2. Creates an unprivileged `blindwire` service account.
 3. Installs a hardened systemd service bound to localhost.
 4. Installs Nginx and Certbot.
@@ -52,7 +52,7 @@ rotation pin causes clients to reject the relay.
 systemctl status blindwire-relay --no-pager
 nginx -t
 curl --fail --silent --show-error --https-only \
-  https://relay.blindwire.io/healthz
+  https://relay.blindwire.net/healthz
 sudo certbot renew --dry-run
 ```
 
@@ -60,7 +60,7 @@ Print the deployed SPKI pin:
 
 ```bash
 sudo deploy/scripts/print-spki-pin.sh \
-  /etc/letsencrypt/live/relay.blindwire.io/cert.pem
+  /etc/letsencrypt/live/relay.blindwire.net/cert.pem
 ```
 
 Use the current pin and a separately generated rotation pin when building

@@ -1,7 +1,20 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
-    use crate::commands::ParsedInviteSummary;
-    use crate::state::AppState;
+    use crate::commands::{
+        default_relay_url, finalize_invite_attempt, reset_server_pin_at_path, ParsedInviteSummary,
+    };
+    use crate::error::AppError;
+    use crate::state::{AppState, InviteAttemptError, RoomPhase};
+    use blindwire_core::invite::InvitePayload;
+
+    #[test]
+    fn release_default_uses_the_official_secure_relay() {
+        #[cfg(not(debug_assertions))]
+        assert_eq!(default_relay_url(), "wss://relay.blindwire.net");
+        #[cfg(debug_assertions)]
+        assert_eq!(default_relay_url(), "ws://127.0.0.1:8080");
+    }
 
     // We can't easily mock Tauri's `State<'_, AppState>` or `AppHandle` in pure unit tests
     // without spinning up a mock Tauri app, but we can test the internal handlers and structs directly.
@@ -43,21 +56,124 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_identity_change_blocks_send_and_join_until_resolved() {
+    #[test]
+    fn room_phase_and_generation_transition_together() {
         let state = AppState::new();
+        let generation = state.begin_session();
+        let connecting = state.room_snapshot();
+        assert_eq!(connecting.phase, RoomPhase::Connecting);
+        assert_eq!(connecting.generation, generation);
 
-        // If an identity change is pending, we simulate the state where we shouldn't allow progression
-        let change_handle = state.store_identity_change();
+        assert!(state.transition_room(generation, RoomPhase::Verifying));
+        assert_eq!(state.room_snapshot().phase, RoomPhase::Verifying);
+    }
 
-        // In reality, the `join_room` and `send_message` commands will check
-        // `state.pending_identity_changes.is_empty()` or similar flags before proceeding.
-        // We enforce this logic here.
-        assert!(!state.pending_identity_changes.is_empty());
+    #[test]
+    fn stale_room_transition_is_ignored_after_leave() {
+        let state = AppState::new();
+        let stale_generation = state.begin_session();
+        state.clear_session_state();
+        let after_leave = state.room_snapshot();
 
-        // Resolving it with the proper handle
-        let resolved = state.consume_identity_change(&change_handle);
-        assert!(resolved);
-        assert!(state.pending_identity_changes.is_empty());
+        assert_eq!(after_leave.phase, RoomPhase::Idle);
+        assert!(after_leave.generation > stale_generation);
+        assert!(!state.transition_room(stale_generation, RoomPhase::Active));
+        assert_eq!(state.room_snapshot(), after_leave);
+    }
+    #[test]
+    fn official_relay_pin_reset_is_forbidden() {
+        let path =
+            std::env::temp_dir().join(format!("blindwire-missing-{}.txt", uuid::Uuid::new_v4()));
+        let error = reset_server_pin_at_path(path, "wss://relay.blindwire.net")
+            .expect_err("the official relay must never use a mutable user pin");
+
+        assert_eq!(error.code, "PIN_RESET_FORBIDDEN");
+    }
+
+    #[test]
+    fn missing_custom_relay_pin_has_a_stable_error() {
+        let path =
+            std::env::temp_dir().join(format!("blindwire-missing-{}.txt", uuid::Uuid::new_v4()));
+        let error = reset_server_pin_at_path(path, "wss://custom.example")
+            .expect_err("resetting an unknown pin must not report success");
+
+        assert_eq!(error.code, "PIN_NOT_FOUND");
+    }
+
+    fn test_invite() -> InvitePayload {
+        InvitePayload {
+            room: "cm9vbQ".to_string(),
+            token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            exp: u64::MAX,
+            relay_url: "wss://relay.blindwire.net".parse().unwrap(),
+            relay_pin: None,
+        }
+    }
+
+    #[test]
+    fn invite_attempt_can_be_released_for_retry() {
+        let state = AppState::new();
+        let handle = state.store_invite(test_invite());
+        let lease = state.begin_invite_attempt(&handle).unwrap();
+
+        assert_eq!(
+            state.begin_invite_attempt(&handle),
+            Err(InviteAttemptError::InProgress)
+        );
+        state
+            .release_invite_attempt(&handle, lease.generation)
+            .unwrap();
+        assert!(state.begin_invite_attempt(&handle).is_ok());
+    }
+
+    #[test]
+    fn retryable_join_failure_releases_invite_attempt() {
+        let state = AppState::new();
+        let handle = state.store_invite(test_invite());
+        let lease = state.begin_invite_attempt(&handle).unwrap();
+
+        finalize_invite_attempt(lease, true).unwrap();
+        assert!(state.begin_invite_attempt(&handle).is_ok());
+    }
+
+    #[test]
+    fn fatal_join_failure_consumes_invite_attempt() {
+        let state = AppState::new();
+        let handle = state.store_invite(test_invite());
+        let lease = state.begin_invite_attempt(&handle).unwrap();
+
+        finalize_invite_attempt(lease, false).unwrap();
+        assert_eq!(
+            state.begin_invite_attempt(&handle),
+            Err(InviteAttemptError::Missing)
+        );
+    }
+    #[test]
+    fn relay_reachability_failure_is_retryable() {
+        let error = AppError::from(blindwire_transport::TransportError::ConnectionFailed(
+            "network unavailable".to_string(),
+        ));
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn tls_validation_failure_is_not_retryable() {
+        let error = AppError::from(blindwire_transport::TransportError::TlsValidationFailed);
+        assert_eq!(error.code, "RELAY_IDENTITY_INVALID");
+        assert!(!error.retryable);
+    }
+    #[test]
+    fn invite_attempt_is_permanently_consumed() {
+        let state = AppState::new();
+        let handle = state.store_invite(test_invite());
+        let lease = state.begin_invite_attempt(&handle).unwrap();
+
+        state
+            .consume_invite_attempt(&handle, lease.generation)
+            .unwrap();
+        assert_eq!(
+            state.begin_invite_attempt(&handle),
+            Err(InviteAttemptError::Missing)
+        );
     }
 }

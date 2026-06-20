@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use blindwire_core::frame::Frame;
 use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
 use blindwire_server::run_server;
@@ -277,7 +279,7 @@ async fn test_responder_token_reusable_before_handshake_starts() {
 }
 
 #[tokio::test]
-async fn test_responder_token_consumed_when_handshake_starts() {
+async fn test_responder_token_reusable_until_noise_xx_completes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("ws://{addr}");
@@ -330,7 +332,7 @@ async fn test_responder_token_consumed_when_handshake_starts() {
         vec![0x05, 0x01]
     );
 
-    // The first Noise handshake frame crosses the point-of-no-return.
+    // Noise XX message 1 alone must not burn the invitation.
     i_ws.send(Message::Binary(vec![0x01, 0x00, 0x01, 0x01]))
         .await
         .unwrap();
@@ -340,9 +342,47 @@ async fn test_responder_token_consumed_when_handshake_starts() {
     assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x03);
 
     let (mut r2_ws, _) = connect_async(&url).await.unwrap();
-    r2_ws.send(Message::Binary(responder_join)).await.unwrap();
+    r2_ws
+        .send(Message::Binary(responder_join.clone()))
+        .await
+        .unwrap();
+    let initiator_notice = tokio::time::timeout(Duration::from_secs(1), i_ws.next())
+        .await
+        .expect("token should remain reusable after Noise XX message 1")
+        .unwrap()
+        .unwrap()
+        .into_data();
+    assert_eq!(initiator_notice[0], 0x02);
+    let responder_notice = tokio::time::timeout(Duration::from_secs(1), r2_ws.next())
+        .await
+        .expect("replacement responder should be admitted")
+        .unwrap()
+        .unwrap()
+        .into_data();
+    assert_eq!(responder_notice[0], 0x02);
 
-    let error = r2_ws.next().await.unwrap().unwrap().into_data();
+    // Noise XX messages 1, 2, and 3 complete the relay-visible handshake sequence.
+    i_ws.send(Message::Binary(vec![0x01, 0x00, 0x01, 0x01]))
+        .await
+        .unwrap();
+    assert_eq!(r2_ws.next().await.unwrap().unwrap().into_data()[0], 0x01);
+    r2_ws
+        .send(Message::Binary(vec![0x01, 0x00, 0x01, 0x01]))
+        .await
+        .unwrap();
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x01);
+    i_ws.send(Message::Binary(vec![0x01, 0x00, 0x01, 0x01]))
+        .await
+        .unwrap();
+    assert_eq!(r2_ws.next().await.unwrap().unwrap().into_data()[0], 0x01);
+
+    drop(r2_ws);
+    assert_eq!(i_ws.next().await.unwrap().unwrap().into_data()[0], 0x03);
+
+    let (mut r3_ws, _) = connect_async(&url).await.unwrap();
+    r3_ws.send(Message::Binary(responder_join)).await.unwrap();
+
+    let error = r3_ws.next().await.unwrap().unwrap().into_data();
     assert_eq!(error, vec![0x05, 0x04]); // ERROR(UNAUTHORIZED)
 }
 

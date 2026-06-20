@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 //! End-to-end integration test for blindwire-transport with blindwire-server.
 
 use blindwire_server::run_server;

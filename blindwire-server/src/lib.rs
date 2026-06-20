@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -37,6 +38,8 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 const MAX_QUEUE_DEPTH: usize = 32;
 const MAX_CONN_PER_IP: usize = 5;
 const MAX_TOTAL_CONNECTIONS: usize = 1000;
+const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Packet format [Opcode:1][Length:2][Frame:N]
 // Hard limit: 1 + 2 + 4096 = 4099 bytes.
@@ -94,6 +97,7 @@ struct Session {
     last_activity: Instant,
     token: Option<[u8; 32]>,
     token_state: TokenState,
+    noise_progress: NoiseProgress,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +107,29 @@ enum TokenState {
     Consumed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoiseProgress {
+    AwaitingInitiator,
+    AwaitingResponder,
+    AwaitingFinalInitiator,
+    Complete,
+}
+
 type SessionMap = Arc<DashMap<String, Session>>;
 type IpConnMap = Arc<DashMap<IpAddr, usize>>;
+
+fn effective_client_ip(peer_ip: IpAddr, request: &Request) -> IpAddr {
+    if !peer_ip.is_loopback() {
+        return peer_ip;
+    }
+
+    request
+        .headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or(peer_ip)
+}
 
 pub async fn run_server(listener: TcpListener) {
     let sessions: SessionMap = Arc::new(DashMap::new());
@@ -167,11 +192,28 @@ pub async fn run_server(listener: TcpListener) {
         let total_conns = total_conns.clone();
 
         tokio::spawn(async move {
-            let ip = peer_addr.ip();
+            let peer_ip = peer_addr.ip();
+            let forwarded_ip = Arc::new(StdMutex::new(None));
+            let forwarded_ip_for_callback = forwarded_ip.clone();
 
-            // Perform handshake FIRST, then check limits
-            match accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await {
-                Ok(mut ws) => {
+            let handshake = tokio::time::timeout(
+                WEBSOCKET_HANDSHAKE_TIMEOUT,
+                accept_hdr_async(stream, move |req: &Request, res: Response| {
+                    if let Ok(mut slot) = forwarded_ip_for_callback.lock() {
+                        *slot = Some(effective_client_ip(peer_ip, req));
+                    }
+                    Ok(res)
+                }),
+            )
+            .await;
+
+            match handshake {
+                Ok(Ok(mut ws)) => {
+                    let ip = forwarded_ip
+                        .lock()
+                        .ok()
+                        .and_then(|guard| *guard)
+                        .unwrap_or(peer_ip);
                     // Global limit check
                     if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
                         total_conns.fetch_sub(1, Ordering::SeqCst);
@@ -209,9 +251,12 @@ pub async fn run_server(listener: TcpListener) {
                             *c -= 1
                         }
                     });
+                    if ip_conns.get(&ip).is_some_and(|count| *count == 0) {
+                        ip_conns.remove(&ip);
+                    }
                     total_conns.fetch_sub(1, Ordering::SeqCst);
                 }
-                Err(_e) => {
+                Ok(Err(_)) | Err(_) => {
                     // Handshake failed
                 }
             }
@@ -231,7 +276,9 @@ async fn handle_connection_ws(
     let session_id;
     let role_byte;
 
-    if let Some(Ok(Message::Binary(data))) = ws_rx.next().await {
+    if let Ok(Some(Ok(Message::Binary(data)))) =
+        tokio::time::timeout(JOIN_TIMEOUT, ws_rx.next()).await
+    {
         // Burst check
         {
             let now = Instant::now();
@@ -328,6 +375,7 @@ async fn handle_connection_ws(
                     return Ok(());
                 }
                 session.token_state = TokenState::Reserved;
+                session.noise_progress = NoiseProgress::AwaitingInitiator;
             } else {
                 // Room doesn't exist
                 let _ = ws_tx
@@ -378,6 +426,7 @@ async fn handle_connection_ws(
             last_activity: Instant::now(),
             token: None,
             token_state: TokenState::Available,
+            noise_progress: NoiseProgress::AwaitingInitiator,
         });
 
         session.last_activity = Instant::now();
@@ -395,6 +444,7 @@ async fn handle_connection_ws(
             rand::thread_rng().fill_bytes(&mut token);
             session.token = Some(token);
             session.token_state = TokenState::Available;
+            session.noise_progress = NoiseProgress::AwaitingInitiator;
 
             // Send token to Initiator: [0x06][token:32]
             let mut token_pkt = Vec::with_capacity(33);
@@ -476,11 +526,20 @@ async fn handle_connection_ws(
                                         relay_result = Err("Queue full");
                                         break;
                                     }
-                                    if role == 'i'
-                                        && is_handshake_frame
-                                        && s.token_state == TokenState::Reserved
-                                    {
-                                        s.token_state = TokenState::Consumed;
+                                    if is_handshake_frame && s.token_state == TokenState::Reserved {
+                                        s.noise_progress = match (s.noise_progress, role) {
+                                            (NoiseProgress::AwaitingInitiator, 'i') => {
+                                                NoiseProgress::AwaitingResponder
+                                            }
+                                            (NoiseProgress::AwaitingResponder, 'r') => {
+                                                NoiseProgress::AwaitingFinalInitiator
+                                            }
+                                            (NoiseProgress::AwaitingFinalInitiator, 'i') => {
+                                                s.token_state = TokenState::Consumed;
+                                                NoiseProgress::Complete
+                                            }
+                                            (progress, _) => progress,
+                                        };
                                     }
                                 }
                             }
@@ -501,6 +560,7 @@ async fn handle_connection_ws(
             s.responder_tx = None;
             if s.token_state == TokenState::Reserved {
                 s.token_state = TokenState::Available;
+                s.noise_progress = NoiseProgress::AwaitingInitiator;
             }
         }
 
@@ -527,4 +587,33 @@ fn hash_id(id: &str) -> String {
     hasher.update(id);
     let result = hasher.finalize();
     hex::encode(&result[..8]) // Truncated hash for privacy purposes inside server logs if enabled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_reverse_proxy_may_supply_client_ip() {
+        let request = Request::builder()
+            .header("x-real-ip", "203.0.113.42")
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            effective_client_ip("127.0.0.1".parse().unwrap(), &request),
+            "203.0.113.42".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_client_cannot_spoof_forwarded_ip() {
+        let request = Request::builder()
+            .header("x-real-ip", "203.0.113.42")
+            .body(())
+            .unwrap();
+        let peer = "198.51.100.7".parse::<IpAddr>().unwrap();
+
+        assert_eq!(effective_client_ip(peer, &request), peer);
+    }
 }

@@ -14,6 +14,7 @@ type RoomPhase = 'idle' | 'connecting' | 'verifying' | 'active' | 'peer_disconne
 type RoomSnapshot = {
   phase: RoomPhase;
   generation: number;
+  revision: number;
   peer_verified: boolean;
   room: string | null;
   verification: VerificationState | null;
@@ -34,7 +35,7 @@ function App() {
   const [linkInput, setLinkInput] = useState('');
   const [messages, setMessages] = useState<{ text: string; timestamp: number; isMe: boolean }[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const latestGeneration = useRef(0);
+  const latestSnapshot = useRef({ generation: -1, revision: -1 });
   const pendingInvite = useRef<ParsedInviteSummary | null>(null);
 
   useEffect(() => {
@@ -49,8 +50,14 @@ function App() {
     });
 
     const applyRoomSnapshot = (snapshot: RoomSnapshot) => {
-      if (snapshot.generation < latestGeneration.current) return;
-      latestGeneration.current = snapshot.generation;
+      const latest = latestSnapshot.current;
+      if (
+        snapshot.generation < latest.generation
+        || (snapshot.generation === latest.generation && snapshot.revision <= latest.revision)
+      ) {
+        return;
+      }
+      latestSnapshot.current = { generation: snapshot.generation, revision: snapshot.revision };
 
       switch (snapshot.phase) {
         case 'idle':

@@ -5,7 +5,9 @@ mod tests {
         default_relay_url, finalize_invite_attempt, reset_server_pin_at_path, ParsedInviteSummary,
     };
     use crate::error::AppError;
-    use crate::state::{AppState, InviteAttemptError, RoomPhase};
+    use crate::state::{
+        AppState, InviteAttemptError, RoomPhase, SessionOwnershipError, VerificationState,
+    };
     use blindwire_core::invite::InvitePayload;
 
     #[test]
@@ -59,7 +61,7 @@ mod tests {
     #[test]
     fn room_phase_and_generation_transition_together() {
         let state = AppState::new();
-        let generation = state.begin_session();
+        let generation = state.begin_session().unwrap();
         let connecting = state.room_snapshot();
         assert_eq!(connecting.phase, RoomPhase::Connecting);
         assert_eq!(connecting.generation, generation);
@@ -71,7 +73,7 @@ mod tests {
     #[test]
     fn stale_room_transition_is_ignored_after_leave() {
         let state = AppState::new();
-        let stale_generation = state.begin_session();
+        let stale_generation = state.begin_session().unwrap();
         state.clear_session_state();
         let after_leave = state.room_snapshot();
 
@@ -80,6 +82,87 @@ mod tests {
         assert!(!state.transition_room(stale_generation, RoomPhase::Active));
         assert_eq!(state.room_snapshot(), after_leave);
     }
+
+    #[test]
+    fn only_one_session_attempt_can_own_the_runtime() {
+        let state = AppState::new();
+        let generation = state.begin_session().unwrap();
+
+        assert_eq!(
+            state.begin_session(),
+            Err(SessionOwnershipError::AlreadyActive)
+        );
+        assert_eq!(state.active_generation(), Some(generation));
+    }
+
+    #[tokio::test]
+    async fn stale_generation_cannot_replace_or_clear_current_sender() {
+        let state = AppState::new();
+        let stale_generation = state.begin_session().unwrap();
+        let (stale_tx, _stale_rx) = tokio::sync::mpsc::channel(1);
+        assert!(
+            state
+                .install_session_sender(stale_generation, stale_tx)
+                .await
+        );
+        assert!(state.finish_session(stale_generation));
+
+        let current_generation = state.begin_session().unwrap();
+        let (current_tx, _current_rx) = tokio::sync::mpsc::channel(1);
+        assert!(
+            state
+                .install_session_sender(current_generation, current_tx)
+                .await
+        );
+
+        assert!(!state.clear_session_sender(stale_generation).await);
+        assert_eq!(
+            state.session_sender_generation().await,
+            Some(current_generation)
+        );
+    }
+
+    #[test]
+    fn verification_requires_current_verifying_snapshot() {
+        let state = AppState::new();
+        let generation = state.begin_session().unwrap();
+
+        assert!(state.confirm_peer_verified(generation).is_none());
+        assert!(state
+            .transition_room_with(
+                generation,
+                RoomPhase::Verifying,
+                Some("room".to_string()),
+                Some(VerificationState {
+                    identicon_seed: "seed".to_string(),
+                    emojis: vec!["one".to_string()],
+                    verified: false,
+                }),
+                None,
+            )
+            .is_some());
+
+        let confirmed = state
+            .confirm_peer_verified(generation)
+            .expect("current verifying state must be confirmable");
+        assert_eq!(confirmed.phase, RoomPhase::Active);
+        assert!(confirmed.peer_verified);
+        assert!(confirmed.verification.unwrap().verified);
+        assert!(state.confirm_peer_verified(generation).is_none());
+    }
+
+    #[test]
+    fn room_snapshot_revision_is_monotonic() {
+        let state = AppState::new();
+        let generation = state.begin_session().unwrap();
+        let connecting = state.room_snapshot();
+
+        assert!(state.transition_room(generation, RoomPhase::Verifying));
+        let verifying = state.room_snapshot();
+        assert_eq!(verifying.generation, generation);
+        assert!(verifying.revision > connecting.revision);
+    }
+
     #[test]
     fn official_relay_pin_reset_is_forbidden() {
         let path =

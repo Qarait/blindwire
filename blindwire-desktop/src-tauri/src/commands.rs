@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::state::{
     transition_room_snapshot, AppState, InviteAttempt, InviteAttemptError, RoomPhase, RoomSnapshot,
-    VerificationState,
+    SessionSenderSlot, VerificationState,
 };
 use blindwire_core::invite::InvitePayload;
 use blindwire_core::sas;
@@ -72,6 +72,14 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn session_active_error() -> AppError {
+    AppError::new(
+        "SESSION_ACTIVE",
+        "Please leave the current room first.",
+        false,
+    )
+}
+
 #[cfg(debug_assertions)]
 pub(crate) fn default_relay_url() -> &'static str {
     "ws://127.0.0.1:8080"
@@ -108,6 +116,35 @@ pub(crate) fn finalize_invite_attempt(
         attempt.consume()
     }
 }
+
+async fn finish_session_runtime(
+    generation: u64,
+    current_generation: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    session_owner: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    clear_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    session_tx_slot: &SessionSenderSlot,
+    room_snapshot: &std::sync::Arc<std::sync::RwLock<RoomSnapshot>>,
+) {
+    let mut sender = session_tx_slot.lock().await;
+    if sender
+        .as_ref()
+        .is_some_and(|(owner, _)| *owner == generation)
+    {
+        sender.take();
+    }
+    drop(sender);
+
+    let _snapshot = room_snapshot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if session_owner.load(Ordering::SeqCst) == generation
+        && current_generation.load(Ordering::SeqCst) == generation
+    {
+        clear_flag.store(false, Ordering::SeqCst);
+        current_generation.store(generation.saturating_add(1), Ordering::SeqCst);
+        session_owner.store(0, Ordering::SeqCst);
+    }
+}
 /// Spawn the session task that multiplexes sending and receiving.
 /// Returns the JoinHandle so callers can abort it on session replacement.
 #[allow(clippy::too_many_arguments)]
@@ -118,9 +155,8 @@ fn spawn_session_task(
     clear_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     my_generation: u64,
     current_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    session_tx_slot: std::sync::Arc<
-        tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<SessionCmd>>>,
-    >,
+    session_owner: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    session_tx_slot: SessionSenderSlot,
     room_snapshot: std::sync::Arc<std::sync::RwLock<RoomSnapshot>>,
     room: String,
     session_id: [u8; 32],
@@ -151,10 +187,15 @@ fn spawn_session_task(
             ) {
                 emit_room_snapshot(&app_handle, &snapshot);
             }
-            // Cleanup
-            clear_flag.store(false, Ordering::SeqCst);
-            let mut guard = session_tx_slot.lock().await;
-            *guard = None;
+            finish_session_runtime(
+                my_generation,
+                &current_generation,
+                &session_owner,
+                &clear_flag,
+                &session_tx_slot,
+                &room_snapshot,
+            )
+            .await;
             return;
         }
 
@@ -229,9 +270,6 @@ fn spawn_session_task(
                             let _ = app_handle.emit("message_received", MsgEvent { text, timestamp: now_ms() });
                         }
                         Err(TransportError::SessionTerminated) | Err(TransportError::PeerDisconnected) => {
-                            clear_flag.store(false, Ordering::SeqCst);
-                            let mut guard = session_tx_slot.lock().await;
-                            *guard = None;
                             if let Some(snapshot) = transition_room_snapshot(
                                 &room_snapshot,
                                 &current_generation,
@@ -246,9 +284,6 @@ fn spawn_session_task(
                             break;
                         }
                         Err(e) => {
-                            clear_flag.store(false, Ordering::SeqCst);
-                            let mut guard = session_tx_slot.lock().await;
-                            *guard = None;
                             let err: AppError = AppError::from(e);
                             if let Some(snapshot) = transition_room_snapshot(
                                 &room_snapshot,
@@ -267,6 +302,16 @@ fn spawn_session_task(
                 }
             }
         }
+
+        finish_session_runtime(
+            my_generation,
+            &current_generation,
+            &session_owner,
+            &clear_flag,
+            &session_tx_slot,
+            &room_snapshot,
+        )
+        .await;
     })
 }
 
@@ -304,6 +349,7 @@ fn emit_room_error(
     if let Some(snapshot) = state.transition_room_with(generation, phase, None, None, Some(error)) {
         emit_room_snapshot(app_handle, &snapshot);
     }
+    state.finish_session(generation);
 }
 // ────────────────────────────────────────────
 // Tauri Commands
@@ -359,7 +405,7 @@ pub async fn create_room(
     }
 
     // 2. Increment generation, begin session
-    let my_generation = state.begin_session();
+    let my_generation = state.begin_session().map_err(|_| session_active_error())?;
     emit_room_snapshot(&app_handle, &state.room_snapshot());
 
     // 3. Mint a random room ID (16 bytes → 22-char base64url)
@@ -421,15 +467,18 @@ pub async fn create_room(
     let session_tx_slot = state.session_tx.clone();
     let pv_arc = state.peer_verified.clone();
     let gen_arc = state.session_generation.clone();
+    let owner_arc = state.session_owner.clone();
     let room_snapshot = state.room_snapshot.clone();
-    let handle_slot = state.recv_loop_handle.clone();
     let sid = session_id;
 
     // 6. Spawn session task for background processing
     let (tx, rx) = tokio::sync::mpsc::channel(32);
-    {
-        let mut guard = session_tx_slot.lock().await;
-        *guard = Some(tx);
+    if !state.install_session_sender(my_generation, tx).await {
+        return Err(AppError::new(
+            "SESSION_NOT_ACTIVE",
+            "The connection attempt was cancelled.",
+            true,
+        ));
     }
 
     let handle = spawn_session_task(
@@ -439,15 +488,14 @@ pub async fn create_room(
         pv_arc,
         my_generation,
         gen_arc,
+        owner_arc,
         session_tx_slot,
         room_snapshot,
         room_id.clone(),
         sid,
         None,
     );
-    if let Ok(mut h) = handle_slot.lock() {
-        *h = Some(handle);
-    }
+    state.install_session_handle(my_generation, handle);
 
     Ok(RoomInfo {
         invite_uri: invite_uri.clone(),
@@ -561,19 +609,30 @@ pub async fn join_room(
         config = config.with_pins_path(app_dir.join("pins.txt"));
     }
 
-    let my_generation = state.begin_session();
+    let my_generation = state.begin_session().map_err(|_| session_active_error())?;
     emit_room_snapshot(&app_handle, &state.room_snapshot());
     let session_tx_slot = state.session_tx.clone();
     let pv_arc = state.peer_verified.clone();
     let gen_arc = state.session_generation.clone();
+    let owner_arc = state.session_owner.clone();
     let room_snapshot = state.room_snapshot.clone();
     let room = invite.room.clone();
     let handle_slot = state.recv_loop_handle.clone();
 
-    tauri::async_runtime::spawn(async move {
-        let session = match SecureSession::connect(config).await {
-            Ok((session, _)) => session,
-            Err(error) => {
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+    let connect_handle = tauri::async_runtime::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
+
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            SecureSession::connect(config),
+        )
+        .await;
+        let session = match connect_result {
+            Ok(Ok((session, _))) => session,
+            Ok(Err(error)) => {
                 let error = AppError::from(error);
                 let retryable = error.retryable;
                 let _ = finalize_invite_attempt(invite_attempt, retryable);
@@ -593,6 +652,44 @@ pub async fn join_room(
                 ) {
                     emit_room_snapshot(&app_handle, &snapshot);
                 }
+                finish_session_runtime(
+                    my_generation,
+                    &gen_arc,
+                    &owner_arc,
+                    &pv_arc,
+                    &session_tx_slot,
+                    &room_snapshot,
+                )
+                .await;
+                return;
+            }
+            Err(_) => {
+                let error = AppError::new(
+                    "RELAY_UNREACHABLE",
+                    "Timeout connecting to relay server.",
+                    true,
+                );
+                let _ = finalize_invite_attempt(invite_attempt, true);
+                if let Some(snapshot) = transition_room_snapshot(
+                    &room_snapshot,
+                    &gen_arc,
+                    my_generation,
+                    RoomPhase::Idle,
+                    Some(room.clone()),
+                    None,
+                    Some(error),
+                ) {
+                    emit_room_snapshot(&app_handle, &snapshot);
+                }
+                finish_session_runtime(
+                    my_generation,
+                    &gen_arc,
+                    &owner_arc,
+                    &pv_arc,
+                    &session_tx_slot,
+                    &room_snapshot,
+                )
+                .await;
                 return;
             }
         };
@@ -600,7 +697,12 @@ pub async fn join_room(
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         {
             let mut guard = session_tx_slot.lock().await;
-            *guard = Some(tx);
+            if owner_arc.load(Ordering::SeqCst) != my_generation
+                || gen_arc.load(Ordering::SeqCst) != my_generation
+            {
+                return;
+            }
+            *guard = Some((my_generation, tx));
         }
 
         let handle = spawn_session_task(
@@ -610,6 +712,7 @@ pub async fn join_room(
             pv_arc,
             my_generation,
             gen_arc,
+            owner_arc.clone(),
             session_tx_slot,
             room_snapshot,
             room,
@@ -617,9 +720,21 @@ pub async fn join_room(
             Some(invite_attempt),
         );
         if let Ok(mut slot) = handle_slot.lock() {
-            *slot = Some(handle);
+            if owner_arc.load(Ordering::SeqCst) == my_generation {
+                *slot = Some((my_generation, handle));
+            } else {
+                handle.abort();
+            }
         }
     });
+    if !state.install_session_handle(my_generation, connect_handle) {
+        return Err(AppError::new(
+            "SESSION_NOT_ACTIVE",
+            "The connection attempt was cancelled.",
+            true,
+        ));
+    }
+    let _ = start_tx.send(());
 
     Ok(())
 }
@@ -636,21 +751,16 @@ pub async fn confirm_peer_verified(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
-    if !state.has_active_session() {
-        return Err(AppError::new(
-            "SESSION_NOT_ACTIVE",
-            "No active session to verify.",
+    let generation = state.active_generation().ok_or_else(|| {
+        AppError::new("SESSION_NOT_ACTIVE", "No active session to verify.", false)
+    })?;
+    let snapshot = state.confirm_peer_verified(generation).ok_or_else(|| {
+        AppError::new(
+            "SESSION_NOT_VERIFYING",
+            "The secure comparison is not ready to confirm.",
             false,
-        ));
-    }
-
-    state.peer_verified.store(true, Ordering::SeqCst);
-    let generation = state.session_generation.load(Ordering::SeqCst);
-    let snapshot = state
-        .transition_room_with(generation, RoomPhase::Active, None, None, None)
-        .ok_or_else(|| {
-            AppError::new("SESSION_NOT_ACTIVE", "No active session to verify.", false)
-        })?;
+        )
+    })?;
     emit_room_snapshot(&app_handle, &snapshot);
 
     Ok(())
@@ -707,8 +817,14 @@ pub async fn send_message(
     text: String,
     state: State<'_, AppState>,
 ) -> Result<MessageAck, AppError> {
-    // Block if not verified
-    if !state.peer_verified.load(Ordering::SeqCst) {
+    let generation = state
+        .active_generation()
+        .ok_or_else(|| AppError::new("SESSION_NOT_ACTIVE", "No active session.", false))?;
+    let snapshot = state.room_snapshot();
+    if snapshot.generation != generation
+        || snapshot.phase != RoomPhase::Active
+        || !snapshot.peer_verified
+    {
         return Err(AppError::new(
             "SESSION_UNVERIFIED",
             "Cannot send messages before verifying the peer.",
@@ -718,7 +834,10 @@ pub async fn send_message(
 
     let tx = {
         let guard = state.session_tx.lock().await;
-        guard.clone()
+        guard
+            .as_ref()
+            .filter(|(owner, _)| *owner == generation)
+            .map(|(_, sender)| sender.clone())
     };
 
     let tx = tx.ok_or_else(|| AppError::new("SESSION_NOT_ACTIVE", "No active session.", false))?;
@@ -740,9 +859,18 @@ pub async fn leave_room(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
+    let generation = state.active_generation();
     let tx = {
         let mut guard = state.session_tx.lock().await;
-        guard.take()
+        match (generation, guard.as_ref()) {
+            (Some(active), Some((owner, _))) if active == *owner => {
+                guard.take().map(|(_, sender)| sender)
+            }
+            _ => {
+                guard.take();
+                None
+            }
+        }
     };
 
     if let Some(tx) = tx {

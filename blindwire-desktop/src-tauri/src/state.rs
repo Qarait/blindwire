@@ -109,6 +109,7 @@ pub struct VerificationState {
 pub struct RoomSnapshot {
     pub phase: RoomPhase,
     pub generation: u64,
+    pub revision: u64,
     pub peer_verified: bool,
     pub room: Option<String>,
     pub verification: Option<VerificationState>,
@@ -120,6 +121,7 @@ impl Default for RoomSnapshot {
         Self {
             phase: RoomPhase::Idle,
             generation: 0,
+            revision: 0,
             peer_verified: false,
             room: None,
             verification: None,
@@ -127,6 +129,16 @@ impl Default for RoomSnapshot {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOwnershipError {
+    AlreadyActive,
+}
+
+pub type SessionSender = tokio::sync::mpsc::Sender<crate::commands::SessionCmd>;
+pub type SessionSenderSlot = Arc<Mutex<Option<(u64, SessionSender)>>>;
+type SessionTaskSlot = Arc<std::sync::Mutex<Option<(u64, tauri::async_runtime::JoinHandle<()>)>>>;
+
 /// App state injected into Tauri commands.
 pub struct AppState {
     /// Authoritative room lifecycle snapshot shared by commands and background tasks.
@@ -137,7 +149,7 @@ pub struct AppState {
 
     invite_attempt_generation: AtomicU64,
     /// The channel used to send commands to the active session task.
-    pub session_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::commands::SessionCmd>>>>,
+    pub session_tx: SessionSenderSlot,
 
     /// True once the peer has been verified by the user (SAS confirmed).
     /// Wrapped in Arc so it can be cheaply cloned into background tasks.
@@ -149,11 +161,12 @@ pub struct AppState {
     /// The recv loop captures the generation at spawn time and discards events
     /// from a different (stale) generation.
     pub session_generation: Arc<AtomicU64>,
+    pub session_owner: Arc<AtomicU64>,
 
     /// Handle to the current recv loop task.
     ///
     /// The new session start aborts this before spawning a replacement.
-    pub recv_loop_handle: Arc<std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    pub recv_loop_handle: SessionTaskSlot,
 
     /// Stores a pending deep link URI that arrived before the UI was ready.
     pub pending_deep_link: Arc<Mutex<Option<String>>>,
@@ -177,6 +190,7 @@ impl AppState {
             session_tx: Arc::new(Mutex::new(None)),
             peer_verified: Arc::new(AtomicBool::new(false)),
             session_generation: Arc::new(AtomicU64::new(0)),
+            session_owner: Arc::new(AtomicU64::new(0)),
             recv_loop_handle: Arc::new(std::sync::Mutex::new(None)),
             pending_deep_link: Arc::new(Mutex::new(None)),
             ui_ready: AtomicBool::new(false),
@@ -247,11 +261,7 @@ impl AppState {
 
     /// True if there is a live session that can send/receive.
     pub fn has_active_session(&self) -> bool {
-        // Non-blocking check: try_lock. If locked, assume active.
-        match self.session_tx.try_lock() {
-            Ok(guard) => guard.is_some(),
-            Err(_) => true, // locked = recv loop is in it, so it's active
-        }
+        self.session_owner.load(Ordering::SeqCst) != 0
     }
 
     /// Prepare for a new session:
@@ -260,24 +270,31 @@ impl AppState {
     ///   3. Abort the old recv loop task if one exists.
     ///
     /// Returns the newly minted generation number — pass this into `spawn_recv_loop`.
-    pub fn begin_session(&self) -> u64 {
+    pub fn begin_session(&self) -> Result<u64, SessionOwnershipError> {
+        self.session_owner
+            .compare_exchange(0, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| SessionOwnershipError::AlreadyActive)?;
+
         // 1. Reset verification gate
         self.peer_verified.store(false, Ordering::SeqCst);
 
         // 2. Increment generation — fetch_add returns the OLD value, so +1
         let new_gen = self.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.session_owner.store(new_gen, Ordering::SeqCst);
 
         // 3. Abort previous recv loop
         if let Ok(mut handle_guard) = self.recv_loop_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
+            if let Some((_, handle)) = handle_guard.take() {
                 handle.abort();
             }
         }
 
         if let Ok(mut snapshot) = self.room_snapshot.write() {
+            let revision = snapshot.revision.saturating_add(1);
             *snapshot = RoomSnapshot {
                 phase: RoomPhase::Connecting,
                 generation: new_gen,
+                revision,
                 peer_verified: false,
                 room: None,
                 verification: None,
@@ -285,7 +302,102 @@ impl AppState {
             };
         }
 
-        new_gen
+        Ok(new_gen)
+    }
+
+    pub fn active_generation(&self) -> Option<u64> {
+        match self.session_owner.load(Ordering::SeqCst) {
+            0 | u64::MAX => None,
+            generation => Some(generation),
+        }
+    }
+
+    pub fn owns_session(&self, generation: u64) -> bool {
+        self.session_owner.load(Ordering::SeqCst) == generation
+            && self.session_generation.load(Ordering::SeqCst) == generation
+    }
+
+    pub fn finish_session(&self, generation: u64) -> bool {
+        let _snapshot = self
+            .room_snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.owns_session(generation) {
+            return false;
+        }
+        self.peer_verified.store(false, Ordering::SeqCst);
+        let _ = self.session_generation.compare_exchange(
+            generation,
+            generation.saturating_add(1),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        self.session_owner
+            .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub async fn install_session_sender(
+        &self,
+        generation: u64,
+        sender: tokio::sync::mpsc::Sender<crate::commands::SessionCmd>,
+    ) -> bool {
+        let mut slot = self.session_tx.lock().await;
+        if !self.owns_session(generation) {
+            return false;
+        }
+        *slot = Some((generation, sender));
+        true
+    }
+
+    pub async fn clear_session_sender(&self, generation: u64) -> bool {
+        let mut slot = self.session_tx.lock().await;
+        if slot.as_ref().is_some_and(|(owner, _)| *owner == generation) {
+            slot.take();
+            return true;
+        }
+        false
+    }
+
+    pub async fn session_sender_generation(&self) -> Option<u64> {
+        self.session_tx
+            .lock()
+            .await
+            .as_ref()
+            .map(|(generation, _)| *generation)
+    }
+
+    pub fn install_session_handle(
+        &self,
+        generation: u64,
+        handle: tauri::async_runtime::JoinHandle<()>,
+    ) -> bool {
+        let mut slot = self
+            .recv_loop_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.owns_session(generation) {
+            handle.abort();
+            return false;
+        }
+        if let Some((_, previous)) = slot.replace((generation, handle)) {
+            previous.abort();
+        }
+        true
+    }
+
+    pub fn take_session_handle(
+        &self,
+        generation: u64,
+    ) -> Option<tauri::async_runtime::JoinHandle<()>> {
+        let mut slot = self
+            .recv_loop_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|(owner, _)| *owner == generation) {
+            return slot.take().map(|(_, handle)| handle);
+        }
+        None
     }
 
     /// Reset session state on leave or transport error (mirrors begin_session without
@@ -293,15 +405,26 @@ impl AppState {
     pub fn clear_session_state(&self) {
         self.peer_verified.store(false, Ordering::SeqCst);
         let generation = self.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Ok(mut snapshot) = self.room_snapshot.write() {
-            *snapshot = RoomSnapshot {
-                phase: RoomPhase::Idle,
-                generation,
-                peer_verified: false,
-                room: None,
-                verification: None,
-                error: None,
-            };
+        let mut snapshot = self
+            .room_snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.session_owner.store(0, Ordering::SeqCst);
+        let revision = snapshot.revision.saturating_add(1);
+        *snapshot = RoomSnapshot {
+            phase: RoomPhase::Idle,
+            generation,
+            revision,
+            peer_verified: false,
+            room: None,
+            verification: None,
+            error: None,
+        };
+        drop(snapshot);
+        if let Ok(mut slot) = self.recv_loop_handle.lock() {
+            if let Some((_, handle)) = slot.take() {
+                handle.abort();
+            }
         }
     }
 
@@ -343,6 +466,26 @@ impl AppState {
             error,
         )
     }
+
+    pub fn confirm_peer_verified(&self, generation: u64) -> Option<RoomSnapshot> {
+        let mut snapshot = self.room_snapshot.write().ok()?;
+        if !self.owns_session(generation)
+            || snapshot.generation != generation
+            || snapshot.phase != RoomPhase::Verifying
+            || snapshot.verification.is_none()
+        {
+            return None;
+        }
+
+        snapshot.phase = RoomPhase::Active;
+        snapshot.peer_verified = true;
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        if let Some(verification) = snapshot.verification.as_mut() {
+            verification.verified = true;
+        }
+        self.peer_verified.store(true, Ordering::SeqCst);
+        Some(snapshot.clone())
+    }
 }
 pub fn transition_room_snapshot(
     room_snapshot: &Arc<RwLock<RoomSnapshot>>,
@@ -360,6 +503,7 @@ pub fn transition_room_snapshot(
     if snapshot.generation != generation {
         return None;
     }
+    snapshot.revision = snapshot.revision.saturating_add(1);
     snapshot.phase = phase;
     snapshot.peer_verified = phase == RoomPhase::Active;
     if let Some(room) = room {

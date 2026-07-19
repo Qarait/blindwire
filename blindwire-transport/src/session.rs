@@ -11,6 +11,7 @@
 
 use blindwire_core::frame::MessageType;
 use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
+use std::time::Duration;
 
 use crate::config::{Role, TransportConfig};
 use crate::error::TransportError;
@@ -48,6 +49,7 @@ fn validate_signaling_url(config: &TransportConfig) -> Result<(), TransportError
 
 /// re-evaluating the framing layer and potential fragmentation risks.
 const MAX_PLAINTEXT_SIZE: usize = 4000;
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A secure messaging session.
 ///
@@ -94,14 +96,7 @@ impl SecureSession {
         // Connect to signaling server
         let (relay, token) = RelayTransport::connect(&config).await?;
 
-        // Create protocol session
-        let mut inner = match config.role {
-            Role::Initiator => Session::new_initiator()?,
-            Role::Responder => Session::new_responder()?,
-        };
-
-        // Mark as connected
-        inner.on_connected()?;
+        let inner = Self::new_protocol_session(config.role)?;
 
         Ok((
             Self {
@@ -114,14 +109,76 @@ impl SecureSession {
         ))
     }
 
-    /// Complete the connection by waiting for peer and performing handshake.
-    /// Initiator will block here until responder joins.
+    fn new_protocol_session(role: Role) -> Result<Session, TransportError> {
+        let mut session = match role {
+            Role::Initiator => Session::new_initiator()?,
+            Role::Responder => Session::new_responder()?,
+        };
+        session.on_connected()?;
+        Ok(session)
+    }
+
+    /// Complete Noise XX and wait for the relay's two-sided confirmation.
+    /// All responder attempts share this one 30-second deadline.
     pub async fn handshake(&mut self) -> Result<(), TransportError> {
-        if self.config.role == Role::Initiator {
-            self.relay.wait_for_peer().await?;
+        if self.terminated {
+            return Err(TransportError::SessionTerminated);
         }
 
-        Self::perform_handshake(&mut self.inner, &mut self.relay).await
+        let result = match tokio::time::timeout(
+            HANDSHAKE_DEADLINE,
+            self.handshake_until_confirmed(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::Timeout),
+        };
+
+        if result.is_err() {
+            self.do_burn();
+        }
+        result
+    }
+
+    async fn handshake_until_confirmed(&mut self) -> Result<(), TransportError> {
+        loop {
+            if self.config.role == Role::Initiator {
+                match self.relay.wait_for_peer().await {
+                    Ok(()) => {}
+                    Err(TransportError::PeerDisconnected) => {
+                        self.reset_initiator_noise()?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            match Self::perform_handshake(&mut self.inner, &mut self.relay).await {
+                Ok(()) => {}
+                Err(TransportError::PeerDisconnected) if self.config.role == Role::Initiator => {
+                    self.reset_initiator_noise()?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+
+            self.relay.send_handshake_complete().await?;
+            match self.relay.wait_handshake_confirmed().await {
+                Ok(()) => return Ok(()),
+                Err(TransportError::PeerDisconnected) if self.config.role == Role::Initiator => {
+                    self.reset_initiator_noise()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn reset_initiator_noise(&mut self) -> Result<(), TransportError> {
+        debug_assert_eq!(self.config.role, Role::Initiator);
+        self.inner.terminate();
+        self.inner = Self::new_protocol_session(Role::Initiator)?;
+        Ok(())
     }
 
     /// Perform the Noise_XX handshake.

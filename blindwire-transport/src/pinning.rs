@@ -165,6 +165,26 @@ impl DiskPinStore {
             .map_err(|_| io::Error::other("relay pin store lock was poisoned"))
     }
 
+    fn parent_directory(path: &Path) -> &Path {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    fn process_lock(path: &Path) -> io::Result<std::fs::File> {
+        let parent = Self::parent_directory(path);
+        std::fs::create_dir_all(parent)?;
+        let lock_path = path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+        Ok(lock_file)
+    }
+
     fn validate_host(host: &str) -> io::Result<()> {
         if host.is_empty() || host.contains(':') || host.contains('\n') || host.contains('\r') {
             return Err(io::Error::new(
@@ -209,10 +229,7 @@ impl DiskPinStore {
     fn write_pins(path: &Path, pins: &BTreeMap<String, [u8; 32]>) -> io::Result<()> {
         static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        let parent = Self::parent_directory(path);
         std::fs::create_dir_all(parent)?;
         let file_name = path.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid relay pin store path")
@@ -270,6 +287,7 @@ impl DiskPinStore {
         Self::validate_host(host)?;
         let path = self.path()?;
         let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
         Ok(Self::load_pins(path)?.get(host).copied())
     }
 
@@ -281,6 +299,7 @@ impl DiskPinStore {
         Self::validate_host(host)?;
         let path = self.path()?;
         let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
         let mut pins = Self::load_pins(path)?;
         match pins.get(host) {
             Some(existing) if existing == &hash => return Ok(()),
@@ -301,6 +320,7 @@ impl DiskPinStore {
         Self::validate_host(host)?;
         let path = self.path()?;
         let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
         let mut pins = Self::load_pins(path)?;
         if pins.remove(host).is_none() {
             return Ok(false);
@@ -781,6 +801,77 @@ mod tests {
         let store = DiskPinStore::new(tmp.path().join("pins.txt"));
         assert_eq!(store.get_pin("first.example").unwrap(), Some([0x11; 32]));
         assert_eq!(store.get_pin("second.example").unwrap(), Some([0x22; 32]));
+    }
+    const PIN_STORE_CHILD_PATH: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_PATH";
+    const PIN_STORE_CHILD_READY: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_READY";
+    const PIN_STORE_CHILD_DONE: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_DONE";
+
+    #[test]
+    fn pin_store_subprocess_writer() {
+        let Some(path) = std::env::var_os(PIN_STORE_CHILD_PATH) else {
+            return;
+        };
+        let ready = std::env::var_os(PIN_STORE_CHILD_READY).unwrap();
+        let done = std::env::var_os(PIN_STORE_CHILD_DONE).unwrap();
+
+        std::fs::write(&ready, b"ready").unwrap();
+        DiskPinStore::new(PathBuf::from(path))
+            .save_pin("child.example", [0x33; 32])
+            .unwrap();
+        std::fs::write(done, b"done").unwrap();
+    }
+
+    #[test]
+    fn separate_process_waits_for_pin_store_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        let ready = tmp.path().join("child.ready");
+        let done = tmp.path().join("child.done");
+        let lock_path = path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock_file).unwrap();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("pinning::tests::pin_store_subprocess_writer")
+            .arg("--nocapture")
+            .env(PIN_STORE_CHILD_PATH, &path)
+            .env(PIN_STORE_CHILD_READY, &ready)
+            .env(PIN_STORE_CHILD_DONE, &done)
+            .spawn()
+            .unwrap();
+
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() && std::time::Instant::now() < ready_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !ready.exists() {
+            let _ = fs2::FileExt::unlock(&lock_file);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(ready.exists(), "subprocess writer did not become ready");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let wrote_while_locked = done.exists();
+        fs2::FileExt::unlock(&lock_file).unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(status.success(), "subprocess writer failed: {status}");
+        assert!(
+            !wrote_while_locked,
+            "a separate process wrote without waiting for the pin-store lock"
+        );
+        assert_eq!(
+            DiskPinStore::new(path).get_pin("child.example").unwrap(),
+            Some([0x33; 32])
+        );
     }
 
     #[test]

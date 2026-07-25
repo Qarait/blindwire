@@ -26,6 +26,7 @@ hex = "0.4"
 # TLS (for wss:// pinning)
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = "1.0"
+fs2 = "0.4.3"
 rustls-webpki = "0.103.13"
 webpki-roots = "0.26"
 sha2 = "0.10"

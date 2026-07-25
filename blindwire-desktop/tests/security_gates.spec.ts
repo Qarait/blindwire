@@ -49,7 +49,6 @@ test('static release sources contain no trust bypass or sensitive logging', () =
   expect(appSource).toContain('<QRCodeSVG');
   expect(appSource).toContain('value={view.info.qr_string}');
   expect(appSource).not.toContain('qr_string.slice(');
-
   const csp = tauriConfig.app.security.csp;
   expect(typeof csp).toBe('string');
   expect(csp).toContain("default-src 'self'");
@@ -57,6 +56,47 @@ test('static release sources contain no trust bypass or sensitive logging', () =
   expect(csp).toContain("img-src 'self' data:");
   expect(csp).not.toContain('*');
 });
+
+test('desktop release metadata uses one beta version', () => {
+  const packageJson = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/package.json'),
+  );
+  const packageLock = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/package-lock.json'),
+  );
+  const tauriConfig = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/src-tauri/tauri.conf.json'),
+  );
+  const cargoPackage = readWorkspaceSource(
+    'blindwire-desktop/src-tauri/Cargo.toml',
+  ).split('[dependencies]')[0];
+  const cargoVersion = cargoPackage.match(/^version = "([^"]+)"$/m)?.[1];
+
+  expect(packageJson.version).toMatch(/^2\.0\.0-beta\.\d+$/);
+  expect(packageLock.version).toBe(packageJson.version);
+  expect(packageLock.packages[''].version).toBe(packageJson.version);
+  expect(tauriConfig.version).toBe(packageJson.version);
+  expect(cargoVersion).toBe(packageJson.version);
+});
+
+test('MSI version maps the beta number to a numeric build', () => {
+  const packageJson = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/package.json'),
+  );
+  const tauriConfig = JSON.parse(
+    readWorkspaceSource('blindwire-desktop/src-tauri/tauri.conf.json'),
+  );
+  const releaseVersion = packageJson.version.match(
+    /^(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$/,
+  );
+
+  expect(releaseVersion).not.toBeNull();
+  const [, major, minor, patch, beta] = releaseVersion;
+  expect(tauriConfig.bundle.windows?.wix?.version).toBe(
+    `${major}.${minor}.${patch}.${beta}`,
+  );
+});
+
 const runResponder = (exe: string, uri: string, relayUrl?: string) => {
     return new Promise<{code: number | null, output: string}>((resolve) => {
       const env = { ...process.env, RUST_LOG: 'info' };

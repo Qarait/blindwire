@@ -24,7 +24,6 @@ function cargoMetadata(root: string) {
   const r = spawnSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], {
     cwd: root,
     encoding: 'utf8',
-    shell: process.platform === 'win32',
   });
   if (r.status !== 0) throw new Error(r.stderr || r.stdout);
   return JSON.parse(r.stdout);
@@ -47,14 +46,11 @@ export async function startRelay(port?: number, testTtl?: string): Promise<{ pro
     const serverProcess = spawn(resolveBin('blindwire-server'), [], {
         cwd: workspaceRoot,
         env,
+        stdio: 'ignore',
     });
-
-    serverProcess.stdout?.on('data', d => console.log(`[RELAY] ${d}`));
-    serverProcess.stderr?.on('data', d => console.log(`[RELAY-ERR] ${d}`));
 
     await waitForSocket('127.0.0.1', actualPort, 5000);
     const url = `ws://127.0.0.1:${actualPort}`;
-    console.log(`[TEST] Relay ready at ${url}`);
 
     return { process: serverProcess, url, port: actualPort };
 }
@@ -106,23 +102,10 @@ export function launchDesktop(opts: DesktopOptions): ChildProcess {
         env['BLINDWIRE_TEST_TTL'] = opts.testTtl;
     }
 
-    const sanitizedEnv = {
-        BLINDWIRE_ALLOW_REMOTE_DEBUG: env.BLINDWIRE_ALLOW_REMOTE_DEBUG,
-        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,
-        WEBVIEW2_USER_DATA_FOLDER: env.WEBVIEW2_USER_DATA_FOLDER,
-        BLINDWIRE_RELAY_URL: env.BLINDWIRE_RELAY_URL,
-        BLINDWIRE_TEST_TTL: env.BLINDWIRE_TEST_TTL,
-    };
-
-    console.log(`[TEST] launching desktop...`);
-    console.log(`  - CWD: ${__dirname}`);
-    console.log(`  - EXE: ${resolveBin('blindwire-desktop')}`);
-    console.log(`  - ENV: ${JSON.stringify(sanitizedEnv)}`);
-
     const appProcess = spawn(resolveBin('blindwire-desktop'), [], {
         env,
         cwd: __dirname, 
-        detached: true
+        detached: false
     });
 
     appProcess.stdout?.on('data', d => console.log(`[APP] ${d}`));
@@ -143,7 +126,6 @@ export function killProcess(proc: ChildProcess) {
 
 export async function waitForCDP(port: number, appProcess: ChildProcess, timeoutMs = 20000): Promise<void> {
   const start = Date.now();
-  console.log(`[TEST] Polling CDP on port ${port}...`);
   while (Date.now() - start < timeoutMs) {
     if (appProcess.exitCode !== null || appProcess.killed) {
       throw new Error(`App exited prematurely with code ${appProcess.exitCode}`);

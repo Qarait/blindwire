@@ -1,84 +1,35 @@
 import { test, expect, chromium, Browser, Page } from '@playwright/test';
 import { spawn, ChildProcess } from 'child_process';
-import fs from 'fs/promises';
+import fs from 'node:fs/promises';
 import os from 'os';
-import path from 'path';
-import net from 'net';
+import path from 'node:path';
+import { getFreePort, killProcess, launchDesktop, resolveBin, startRelay, waitForAppPage, waitForCDP } from './harness';
 
 let childProcess: ChildProcess;
+let serverProcess: ChildProcess;
 let browser: Browser;
 let page: Page;
 let debugPort: number;
 let userDataDir: string;
 
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        reject(new Error('failed to get free port'));
-        return;
-      }
-      const port = addr.port;
-      server.close(() => resolve(port));
-    });
-    server.on('error', reject);
-  });
-}
-
-async function waitForCdp(port: number, timeoutMs = 15000): Promise<Browser> {
-  const start = Date.now();
-  let lastErr: unknown;
-  while (Date.now() - start < timeoutMs) {
-    try {
-      return await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-    } catch (e) {
-      lastErr = e;
-      await new Promise(r => setTimeout(r, 250));
-    }
-  }
-  throw new Error(`CDP not available on port ${port}: ${String(lastErr)}`);
-}
-
 test.beforeEach(async () => {
+  const relay = await startRelay();
+  serverProcess = relay.process;
   debugPort = await getFreePort();
   userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'blindwire-smoke-'));
 
-  const exePath = path.resolve('../target/debug/blindwire-desktop.exe');
-
-  childProcess = spawn(exePath, [], {
-    env: {
-      ...process.env,
-      BLINDWIRE_ALLOW_REMOTE_DEBUG: '1',
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${debugPort}`,
-      WEBVIEW2_USER_DATA_FOLDER: userDataDir,
-      BLINDWIRE_RUN_ID: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    },
-    detached: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
+  childProcess = launchDesktop({
+    debugPort,
+    userDataDir,
+    relayUrl: relay.url,
   });
 
-  childProcess.stdout?.on('data', (d: any) => process.stdout.write(`[DESKTOP stdout] ${d}`));
-  childProcess.stderr?.on('data', (d: any) => process.stderr.write(`[DESKTOP stderr] ${d}`));
-
-  browser = await waitForCdp(debugPort);
+  await waitForCDP(debugPort, childProcess);
+  browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
 
   const ctx = browser.contexts()[0];
   
-  // Wait for Tauri to load the window
-  for (let i = 0; i < 50; i++) {
-    const pages = ctx.pages();
-    const target = pages.find(p => !p.url().includes('about:blank') && p.url() !== '');
-    if (target) {
-      page = target;
-      break;
-    }
-    await new Promise(r => setTimeout(r, 100));
-  }
-  if (!page) {
-    page = ctx.pages()[0];
-  }
+  page = await waitForAppPage(ctx);
 
   page.on('console', msg => process.stdout.write(`[BROWSER CONSOLE] ${msg.text()}\n`));
   page.on('pageerror', error => process.stdout.write(`[BROWSER ERROR] ${error.message}\n`));
@@ -89,11 +40,8 @@ test.beforeEach(async () => {
 test.afterEach(async () => {
   try { await browser?.close(); } catch {}
 
-  if (childProcess?.pid) {
-    // Windows-safe hard cleanup
-    spawn('taskkill', ['/PID', String(childProcess.pid), '/T', '/F'], { stdio: 'ignore' });
-  }
-
+  if (childProcess) killProcess(childProcess);
+  if (serverProcess) killProcess(serverProcess);
   try { await fs.rm(userDataDir, { recursive: true, force: true }); } catch {}
 });
 
@@ -125,12 +73,10 @@ test('Reality Smoke: App (A) <-> Headless Responder (B)', async () => {
 
     // 4. Extract Invite URI
     const inviteUri = await page.locator('#invite-link-input').inputValue();
-    console.log(`[SMOKE] Extracted URI: ${inviteUri}`);
     expect(inviteUri).toContain('blindwire://join');
 
     // 5. Spawn Headless Responder (Instance B)
-    const responderPath = path.resolve('../target/debug/smoke-responder.exe');
-    console.log(`[SMOKE] Spawning responder: ${responderPath}`);
+    const responderPath = resolveBin('smoke-responder');
 
     const responder = spawn(responderPath, [inviteUri, '--expect-msg', 'Reality Check'], {
         env: { ...process.env }
@@ -242,7 +188,7 @@ test('Step 5: Fresh Session Hygiene (SAS Uniqueness)', async () => {
         }
         const inviteUri = await page.locator('#invite-link-input').inputValue();
 
-        const responder = spawn(path.resolve('../target/debug/smoke-responder.exe'), [inviteUri], {
+        const responder = spawn(resolveBin('smoke-responder'), [inviteUri], {
             env: { ...process.env }
         });
 

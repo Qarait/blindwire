@@ -14,6 +14,10 @@ dist-ssr
 
 # Editor directories and files
 .vscode/*
+
+# Playwright artifacts
+/test-results/
+/playwright-report/
 !.vscode/extensions.json
 .idea
 .DS_Store

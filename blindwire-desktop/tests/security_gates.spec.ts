@@ -1,11 +1,13 @@
 import { test, expect, chromium } from '@playwright/test';
-import { spawn, spawnSync } from 'node:child_process';
+import type { Locator } from '@playwright/test';
+import jsQR from 'jsqr';
+import { PNG } from 'pngjs';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
-import net from 'node:net';
 
 import { startRelay, getFreePort, resolveBin, launchDesktop, waitForCDP, waitForAppPage, killProcess } from './harness';
 
@@ -15,6 +17,18 @@ const workspaceRoot = path.resolve(__dirname, '..', '..');
 
 const readWorkspaceSource = (relativePath: string) =>
   fs.readFileSync(path.join(workspaceRoot, relativePath), 'utf8');
+
+const decodeQr = async (locator: Locator): Promise<string> => {
+  const png = PNG.sync.read(await locator.screenshot());
+  const pixels = new Uint8ClampedArray(
+    png.data.buffer,
+    png.data.byteOffset,
+    png.data.byteLength,
+  );
+  const decoded = jsQR(pixels, png.width, png.height);
+  if (!decoded) throw new Error('Rendered invite QR code could not be decoded');
+  return decoded.data;
+};
 
 test('static release sources contain no trust bypass or sensitive logging', () => {
   const appSource = readWorkspaceSource('blindwire-desktop/src/App.tsx');
@@ -45,7 +59,6 @@ test('static release sources contain no trust bypass or sensitive logging', () =
 });
 const runResponder = (exe: string, uri: string, relayUrl?: string) => {
     return new Promise<{code: number | null, output: string}>((resolve) => {
-      console.log(`[RESPONDER] Joining with URI: ${uri}`);
       const env = { ...process.env, RUST_LOG: 'info' };
       if (relayUrl) env['BLINDWIRE_RELAY_URL'] = relayUrl;
 
@@ -69,14 +82,6 @@ test.describe.configure({ mode: 'serial' });
 
 test.describe('Phase 7: Deep Hardening Security Gates', () => {
 
-  test.beforeAll(async ({}, testInfo) => {
-    testInfo.setTimeout(120000);
-  });
-
-  test.afterAll(async () => {
-    // empty
-  });
-
   test('Concurrent Race Rejection (Only One Join Wins)', async () => {
     const { process: server, url: relayUrl } = await startRelay();
     const debugPort = await getFreePort();
@@ -99,8 +104,6 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         page.on('console', (msg: any) => console.log(`[PAGE-CONSOLE] ${msg.text()}`));
         console.log(`[TEST] Current Page URL: ${page.url()}`);
 
-        const artifactDir = 'C:\\Users\\Loritamus\\.gemini\\antigravity\\brain\\1ef940e4-a3d8-42e0-9e64-b5ec514dcee3';
-        await page.screenshot({ path: path.join(artifactDir, 'app_home.png') });
 
         console.log('[TEST] Page found, waiting for UI selector...');
         try {
@@ -111,15 +114,18 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
             throw e;
         }
         console.log('[TEST] UI is ready.');
-        await page.click('button:has-text("Create Secure Room")');
-        await page.waitForSelector('#invite-link-input');
+        const createRoom = page.getByRole('button', { name: 'Create Secure Room' });
+        await expect(createRoom).toBeEnabled();
+        await createRoom.evaluate(button => (button as HTMLButtonElement).click());
+        console.log('[TEST] Create Room command submitted.');
+        await page.waitForSelector('#invite-link-input', { timeout: 15000 });
         
         await page.waitForTimeout(500); // let UI settle
-        await page.screenshot({ path: path.join(artifactDir, 'app_invite_generated.png') });
         
         const inviteUri = (await page.inputValue('#invite-link-input')).trim();
 
-        console.log(`[TEST] Racing two responders for URI: ${inviteUri} (relay: ${relayUrl})`);
+        expect(await decodeQr(page.locator('.qr-container svg'))).toBe(inviteUri);
+        console.log('[TEST] Racing two responders for the generated invitation...');
         
         const p1 = runResponder(resolveBin('smoke-responder'), inviteUri, relayUrl);
         const p2 = runResponder(resolveBin('smoke-responder'), inviteUri, relayUrl);
@@ -128,7 +134,6 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         await page.waitForSelector('button:has-text("Matches (Verified)")', { timeout: 15000 });
         
         await page.waitForTimeout(500); // let verification UI settle
-        await page.screenshot({ path: path.join(artifactDir, 'app_verifying.png') });
         
         console.log('[TEST] Clicking Matches (Verified)...');
         await page.click('button:has-text("Matches (Verified)")');
@@ -137,14 +142,12 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         await page.waitForSelector('#chat-input', { timeout: 10000 });
         
         await page.waitForTimeout(500); // let chat UI settle
-        await page.screenshot({ path: path.join(artifactDir, 'app_chat_empty.png') });
         
         console.log('[TEST] Sending mock message...');
         await page.fill('#chat-input', 'Hello from Initiator! This is a secure end-to-end P2P connection.');
         await page.click('#chat-send');
 
         await page.waitForTimeout(500); // let message bubble render
-        await page.screenshot({ path: path.join(artifactDir, 'app_chat_message.png') });
 
         console.log('[TEST] Waiting for responders to exit...');
         const [res1, res2] = await Promise.all([p1, p2]);
@@ -153,12 +156,12 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         const failureCount = (res1.code !== 0 ? 1 : 0) + (res2.code !== 0 ? 1 : 0);
 
         console.log(`[TEST] Race result: success=${successCount}, failure=${failureCount}`);
-        console.log(`[TEST] res1 output: ${res1.output}`);
-        console.log(`[TEST] res2 output: ${res2.output}`);
         expect(successCount).toBe(1);
         expect(failureCount).toBe(1);
         const failedRes = res1.code !== 0 ? res1 : res2;
-        expect(failedRes.output).toContain('UnexpectedResponse(1)');
+        // A loser rejected during reservation sees RoleTaken (1); after atomic
+        // token consumption it sees the deliberately non-disclosing Unauthorized (4).
+        expect(failedRes.output).toMatch(/UnexpectedResponse\((1|4)\)/);
 
         await browser.close();
     } finally {
@@ -246,7 +249,6 @@ test.describe('Phase 7: Deep Hardening Security Gates', () => {
         const uriB = (await page.inputValue('#invite-link-input')).trim();
 
         const mismatchUri = uriB.replace(/t=[A-Za-z0-9_-]+/, `t=${tokenA}`);
-        console.log(`[TEST] Mismatch URI: ${mismatchUri}`);
 
         const res = await runResponder(resolveBin('smoke-responder'), mismatchUri, relayUrl);
         expect(res.code).not.toBe(0);

@@ -1,29 +1,22 @@
 import { test, expect, chromium } from '@playwright/test';
-import { spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
-import { launchDesktop, waitForCDP, waitForAppPage } from './harness';
+import { getFreePort, killProcess, launchDesktop, waitForCDP, waitForAppPage } from './harness';
 
 let childProcess: any;
 let browser: any;
 let page: any;
+let userDataDir: string;
 
 test.beforeAll(async () => {
-    if (process.env.BLINDWIRE_ALLOW_REMOTE_DEBUG !== '1') {
-        throw new Error(
-            'BLINDWIRE_ALLOW_REMOTE_DEBUG=1 must be set to run packaged smoke tests.\n' +
-            'Never set this in production launch scripts or installed app shortcuts.'
-        );
-    }
-
-    const debugPort = 9222;
-    const userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bw-smoke-'));
+    const debugPort = await getFreePort();
+    userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bw-smoke-'));
     childProcess = launchDesktop({ debugPort, userDataDir });
 
     await waitForCDP(debugPort, childProcess);
 
-    browser = await chromium.connectOverCDP(`http://localhost:${debugPort}`);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
     const defaultContext = browser.contexts()[0];
     
     page = await waitForAppPage(defaultContext);
@@ -33,10 +26,14 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
     if (browser) await browser.close();
-    if (childProcess) {
-        childProcess.kill();
-        // Windows usually needs tree-kill or forcefully killing the exe
-        try { spawn('taskkill', ['/pid', childProcess.pid.toString(), '/f', '/t']); } catch (e) { }
+    if (childProcess) killProcess(childProcess);
+    if (userDataDir) {
+        await fs.promises.rm(userDataDir, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 200,
+        });
     }
 });
 

@@ -13,6 +13,8 @@ pub enum TransportError {
     ConnectionFailed(String),
     /// TLS certificate or relay identity validation failed.
     TlsValidationFailed,
+    /// A custom TLS relay using TOFU has no persistent pin-store path.
+    PinStoreRequired,
     /// Noise handshake failed.
     HandshakeFailed,
     /// Operation timed out.
@@ -50,6 +52,7 @@ impl fmt::Display for TransportError {
         match self {
             Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
             Self::TlsValidationFailed => write!(f, "TLS validation failed"),
+            Self::PinStoreRequired => write!(f, "persistent relay pin storage is required"),
             Self::HandshakeFailed => write!(f, "handshake failed"),
             Self::Protocol(e) => write!(f, "protocol error: {e:?}"),
             Self::SessionTerminated => write!(f, "session terminated"),

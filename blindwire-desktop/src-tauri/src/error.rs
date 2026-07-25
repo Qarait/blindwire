@@ -76,6 +76,11 @@ impl From<TransportError> for AppError {
                 "The relay's certificate or security identity could not be verified.",
                 false,
             ),
+            TransportError::PinStoreRequired => Self::new(
+                "PIN_STORE_FAILED",
+                "A secure custom relay requires persistent identity storage.",
+                false,
+            ),
             TransportError::HandshakeFailed => Self::new(
                 "HANDSHAKE_FAILED",
                 "The secure handshake failed. The server identity may have changed.",

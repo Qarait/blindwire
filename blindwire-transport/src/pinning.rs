@@ -24,7 +24,11 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 pub use blindwire_core::invite::OFFICIAL_RELAY_HOST;
 
@@ -53,7 +57,7 @@ pub enum PinError {
     TlsError(String),
     /// Could not extract SPKI from certificate DER.
     SpkiExtractionFailed,
-    /// Could not durably persist a first-use pin.
+    /// The persistent pin store could not be read or durably updated.
     PinPersistenceFailed(String),
 }
 
@@ -72,7 +76,7 @@ impl std::fmt::Display for PinError {
             PinError::TlsError(s) => write!(f, "TLS error: {s}"),
             PinError::SpkiExtractionFailed => write!(f, "could not extract SPKI from certificate"),
             PinError::PinPersistenceFailed(s) => {
-                write!(f, "could not persist first-use server pin: {s}")
+                write!(f, "could not access persistent server pins: {s}")
             }
         }
     }
@@ -127,94 +131,205 @@ impl From<std::io::Error> for PinResetError {
 /// Writes are **atomic** (write to tmp → rename) to avoid half-written state.
 #[derive(Debug)]
 pub struct DiskPinStore {
-    path: std::path::PathBuf,
+    path: Option<PathBuf>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl DiskPinStore {
     /// Create a new store at the given path.
-    pub fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf) -> Self {
+        let write_lock = shared_pin_store_lock(&path);
+        Self {
+            path: Some(path),
+            write_lock,
+        }
+    }
+
+    /// Create a verifier store for connections that cannot enter TOFU mode.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            path: None,
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn path(&self) -> io::Result<&Path> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("persistent relay pin storage is not configured"))
+    }
+
+    fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, ()>> {
+        self.write_lock
+            .lock()
+            .map_err(|_| io::Error::other("relay pin store lock was poisoned"))
+    }
+
+    fn validate_host(host: &str) -> io::Result<()> {
+        if host.is_empty() || host.contains(':') || host.contains('\n') || host.contains('\r') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid relay pin hostname",
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_pins(path: &Path) -> io::Result<BTreeMap<String, [u8; 32]>> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        let mut pins = BTreeMap::new();
+        for line in content.lines() {
+            let (stored_host, stored_hex) = line.split_once(':').ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "malformed relay pin store entry",
+                )
+            })?;
+            Self::validate_host(stored_host).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed relay pin hostname")
+            })?;
+            let mut hash = [0u8; 32];
+            hex::decode_to_slice(stored_hex, &mut hash).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed relay pin hash")
+            })?;
+            if pins.insert(stored_host.to_owned(), hash).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate relay pin hostname",
+                ));
+            }
+        }
+        Ok(pins)
+    }
+
+    fn write_pins(path: &Path, pins: &BTreeMap<String, [u8; 32]>) -> io::Result<()> {
+        static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid relay pin store path")
+        })?;
+
+        let mut content = String::new();
+        for (host, hash) in pins {
+            content.push_str(host);
+            content.push(':');
+            content.push_str(&hex::encode(hash));
+            content.push('\n');
+        }
+
+        let (mut temporary, temporary_path) = loop {
+            let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = format!(
+                ".{}.{}.{}.tmp",
+                file_name.to_string_lossy(),
+                std::process::id(),
+                suffix
+            );
+            let temporary_path = parent.join(name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+            {
+                Ok(file) => break (file, temporary_path),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+
+        let write_result = temporary
+            .write_all(content.as_bytes())
+            .and_then(|_| temporary.flush())
+            .and_then(|_| temporary.sync_all());
+        drop(temporary);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&temporary_path, path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     /// Get the pinned SPKI hash for a canonicalized hostname.
-    pub fn get_pin(&self, host: &str) -> Option<[u8; 32]> {
-        if !self.path.exists() {
-            return None;
-        }
-        let content = std::fs::read_to_string(&self.path).ok()?;
-        for line in content.lines() {
-            let (stored_host, stored_hex) = line.split_once(':')?;
-            if stored_host == host {
-                let mut hash = [0u8; 32];
-                hex::decode_to_slice(stored_hex, &mut hash).ok()?;
-                return Some(hash);
-            }
-        }
-        None
+    pub fn get_pin(&self, host: &str) -> io::Result<Option<[u8; 32]>> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        Ok(Self::load_pins(path)?.get(host).copied())
     }
 
     /// Atomically persist a new SPKI pin for the given canonicalized hostname.
     ///
     /// Uses write-to-temp + rename to avoid corruption under concurrent access
     /// or process crashes mid-write.
-    pub fn save_pin(&self, host: &str, hash: [u8; 32]) -> std::io::Result<()> {
-        // Read existing content
-        let mut content = if self.path.exists() {
-            std::fs::read_to_string(&self.path)?
-        } else {
-            String::new()
-        };
-        content.push_str(&format!("{}:{}\n", host, hex::encode(hash)));
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+    pub fn save_pin(&self, host: &str, hash: [u8; 32]) -> io::Result<()> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        let mut pins = Self::load_pins(path)?;
+        match pins.get(host) {
+            Some(existing) if existing == &hash => return Ok(()),
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "a different relay identity is already pinned for this hostname",
+                ));
+            }
+            None => {}
         }
-
-        // Atomic write: write to .tmp then rename
-        let tmp_path = self.path.with_extension("tmp");
-        std::fs::write(&tmp_path, &content)?;
-        std::fs::rename(&tmp_path, &self.path)
+        pins.insert(host.to_owned(), hash);
+        Self::write_pins(path, &pins)
     }
 
     /// Atomically remove every persisted pin for one canonicalized hostname.
-    pub fn remove_pin(&self, host: &str) -> std::io::Result<bool> {
-        if !self.path.exists() {
+    pub fn remove_pin(&self, host: &str) -> io::Result<bool> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        let mut pins = Self::load_pins(path)?;
+        if pins.remove(host).is_none() {
             return Ok(false);
         }
-        let content = std::fs::read_to_string(&self.path)?;
-        let mut retained = String::new();
-        let mut removed = false;
-
-        for line in content.lines() {
-            let (stored_host, stored_hex) = line.split_once(':').ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed relay pin store entry",
-                )
-            })?;
-            let mut hash = [0u8; 32];
-            hex::decode_to_slice(stored_hex, &mut hash).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed relay pin hash")
-            })?;
-
-            if stored_host == host {
-                removed = true;
-            } else {
-                retained.push_str(line);
-                retained.push('\n');
-            }
-        }
-
-        if !removed {
-            return Ok(false);
-        }
-
-        let tmp_path = self.path.with_extension("tmp");
-        std::fs::write(&tmp_path, retained)?;
-        std::fs::rename(&tmp_path, &self.path)?;
+        Self::write_pins(path, &pins)?;
         Ok(true)
     }
+}
+
+fn shared_pin_store_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let key = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 // ─── Hostname canonicalization ─────────────────────────────────────────────────
@@ -432,7 +547,11 @@ impl ServerCertVerifier for BlindWireVerifier {
         }
 
         // ── 2. Custom server (Auto-TOFU) ──────────────────────────────────────
-        if let Some(pinned) = self.store.get_pin(&host) {
+        let persisted = self
+            .store
+            .get_pin(&host)
+            .map_err(|error| PinError::PinPersistenceFailed(error.to_string()))?;
+        if let Some(pinned) = persisted {
             if pinned == pin {
                 // Pin matched — also validate the SAN covers this hostname.
                 validate_san(end_entity, raw_host)?;
@@ -587,7 +706,7 @@ mod tests {
         let store = DiskPinStore::new(tmp.path().join("pins.txt"));
         let hash = [0xAAu8; 32];
         store.save_pin("example.com", hash).unwrap();
-        let loaded = store.get_pin("example.com").unwrap();
+        let loaded = store.get_pin("example.com").unwrap().unwrap();
         assert_eq!(loaded, hash);
     }
 
@@ -599,10 +718,83 @@ mod tests {
         let hash2 = [0x22u8; 32];
         store.save_pin("a.com", hash1).unwrap();
         store.save_pin("b.com", hash2).unwrap();
-        assert_eq!(store.get_pin("a.com").unwrap(), hash1);
-        assert_eq!(store.get_pin("b.com").unwrap(), hash2);
+        assert_eq!(store.get_pin("a.com").unwrap().unwrap(), hash1);
+        assert_eq!(store.get_pin("b.com").unwrap().unwrap(), hash2);
         // tmp file should be gone after rename
         assert!(!tmp.path().join("pins.tmp").exists());
+    }
+
+    #[test]
+    fn malformed_pin_store_is_an_error_not_first_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        std::fs::write(&path, "custom.example:not-a-pin\n").unwrap();
+        let store = DiskPinStore::new(path);
+
+        let error = store
+            .get_pin("custom.example")
+            .expect_err("corruption must not be interpreted as an empty store");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn duplicate_pin_records_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        std::fs::write(
+            &path,
+            format!(
+                "custom.example:{}\ncustom.example:{}\n",
+                "11".repeat(32),
+                "22".repeat(32)
+            ),
+        )
+        .unwrap();
+        let store = DiskPinStore::new(path);
+
+        let error = store
+            .get_pin("custom.example")
+            .expect_err("duplicate identities must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn concurrent_store_instances_preserve_both_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        let first = DiskPinStore::new(path.clone());
+        let second = DiskPinStore::new(path);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let first_barrier = Arc::clone(&barrier);
+        let first_writer = std::thread::spawn(move || {
+            first_barrier.wait();
+            first.save_pin("first.example", [0x11; 32]).unwrap();
+        });
+        let second_writer = std::thread::spawn(move || {
+            barrier.wait();
+            second.save_pin("second.example", [0x22; 32]).unwrap();
+        });
+        first_writer.join().unwrap();
+        second_writer.join().unwrap();
+
+        let store = DiskPinStore::new(tmp.path().join("pins.txt"));
+        assert_eq!(store.get_pin("first.example").unwrap(), Some([0x11; 32]));
+        assert_eq!(store.get_pin("second.example").unwrap(), Some([0x22; 32]));
+    }
+
+    #[test]
+    fn conflicting_write_cannot_replace_a_pinned_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DiskPinStore::new(tmp.path().join("pins.txt"));
+        store.save_pin("custom.example", [0x11; 32]).unwrap();
+
+        let error = store
+            .save_pin("custom.example", [0x22; 32])
+            .expect_err("a competing first-use write must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(store.get_pin("custom.example").unwrap(), Some([0x11; 32]));
     }
 
     // ── Error codes ───────────────────────────────────────────────────────────
@@ -707,7 +899,7 @@ mod tests {
         let hash_a = [0xAAu8; 32];
         let hash_b = [0xBBu8; 32];
         store.save_pin("relay.example.com", hash_a).unwrap();
-        let loaded = store.get_pin("relay.example.com").unwrap();
+        let loaded = store.get_pin("relay.example.com").unwrap().unwrap();
         assert_eq!(loaded, hash_a);
         // Identity-change check: different hash → should trigger IdentityChanged
         let e = PinError::IdentityChanged;
@@ -727,7 +919,7 @@ mod tests {
         store.save_pin(&key, hash).unwrap();
         // Look up with a differently-cased / port form — should find it after canonicalization
         let lookup_key = canonicalize_host("example.com:443");
-        assert_eq!(store.get_pin(&lookup_key), Some(hash));
+        assert_eq!(store.get_pin(&lookup_key).unwrap(), Some(hash));
     }
 
     // ── Real DER cert fixture tests ────────────────────────────────────────
@@ -858,7 +1050,9 @@ mod tests {
 
         let result = verifier.verify_server_cert(&cert, &[], &server, &[], UnixTime::now());
         let error = result.expect_err("TOFU must fail if the first-use pin cannot be stored");
-        assert!(error.to_string().contains("could not persist"));
+        assert!(error
+            .to_string()
+            .contains("could not access persistent server pins"));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use crate::config::TransportConfig;
 use crate::error::TransportError;
-use crate::pinning::{BlindWireVerifier, DiskPinStore, OFFICIAL_RELAY_HOST};
+use crate::pinning::{canonicalize_host, BlindWireVerifier, DiskPinStore, OFFICIAL_RELAY_HOST};
 use blindwire_core::frame::Frame;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
@@ -64,11 +64,21 @@ impl RelayTransport {
         let url = &config.signaling_url;
         let session_id = config.session_id;
 
-        let pins_path = config
-            .pins_path
-            .clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("blindwire_pins.txt"));
-        let store = Arc::new(DiskPinStore::new(pins_path));
+        let parsed_url = url::Url::parse(url)
+            .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
+        let relay_host = parsed_url
+            .host_str()
+            .ok_or_else(|| TransportError::ConnectionFailed("relay URL has no host".to_owned()))?;
+        let requires_tofu = parsed_url.scheme() == "wss"
+            && canonicalize_host(relay_host) != OFFICIAL_RELAY_HOST
+            && config.expected_server_pin.is_none();
+        if requires_tofu && config.pins_path.is_none() {
+            return Err(TransportError::PinStoreRequired);
+        }
+        let store = Arc::new(match config.pins_path.clone() {
+            Some(path) => DiskPinStore::new(path),
+            None => DiskPinStore::disabled(),
+        });
 
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut roots = rustls::RootCertStore::empty();

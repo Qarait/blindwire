@@ -2303,6 +2303,17 @@ pub fn generate(shared_secret: &[u8; 32], session_id: &[u8; 32]) -> Vec<String> 
         .collect()
 }
 
+/// Generate a seven-group numeric SAS from the shared secret and session ID.
+pub fn generate_numeric(shared_secret: &[u8; 32], session_id: &[u8; 32]) -> [u16; 7] {
+    let hk = Hkdf::<Sha256>::new(Some(session_id), shared_secret);
+    let mut okm = [0_u8; 14];
+    let _ = hk.expand(b"blindwire-sas-numeric-v1", &mut okm);
+    std::array::from_fn(|index| {
+        let offset = index * 2;
+        u16::from_be_bytes([okm[offset], okm[offset + 1]]) % 1000
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

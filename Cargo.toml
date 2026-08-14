@@ -5,6 +5,7 @@ members = [
     "blindwire-server",
     "blindwire-transport",
     "blindwire-desktop/src-tauri",
+    "blindwire-web-core",
 ]
 resolver = "2"
 

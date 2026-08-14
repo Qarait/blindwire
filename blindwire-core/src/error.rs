@@ -11,6 +11,8 @@ use std::fmt;
 /// No error is "recoverable" or "retryable".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
+    /// Secure platform randomness was unavailable.
+    EntropyUnavailable,
     /// Message length exceeds maximum (4096 bytes)
     MessageTooLarge,
 
@@ -20,6 +22,12 @@ pub enum ProtocolError {
     /// Unknown message type byte
     UnknownMessageType,
 
+    /// Unknown application envelope type byte
+    UnknownApplicationType,
+
+    /// Application envelope is truncated or has trailing bytes
+    InvalidApplicationEnvelope,
+
     /// Message type not allowed in current state
     UnexpectedMessageType,
 
@@ -28,6 +36,9 @@ pub enum ProtocolError {
 
     /// Noise decryption/authentication failed
     DecryptionFailed,
+
+    /// Session recovery proof authentication failed
+    InvalidResumeProof,
 
     /// Plaintext is not valid UTF-8
     InvalidUtf8,
@@ -73,12 +84,16 @@ impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Deliberately terse. Do not leak details.
         match self {
+            Self::EntropyUnavailable => write!(f, "entropy unavailable"),
             Self::MessageTooLarge => write!(f, "message too large"),
             Self::MessageEmpty => write!(f, "message empty"),
             Self::UnknownMessageType => write!(f, "unknown message type"),
+            Self::UnknownApplicationType => write!(f, "unknown application type"),
+            Self::InvalidApplicationEnvelope => write!(f, "invalid application envelope"),
             Self::UnexpectedMessageType => write!(f, "unexpected message type"),
             Self::HandshakeFailed => write!(f, "handshake failed"),
             Self::DecryptionFailed => write!(f, "decryption failed"),
+            Self::InvalidResumeProof => write!(f, "invalid resume proof"),
             Self::InvalidUtf8 => write!(f, "invalid utf-8"),
             Self::NulByteInPlaintext => write!(f, "nul byte in plaintext"),
             Self::EmptyPlaintext => write!(f, "empty plaintext"),

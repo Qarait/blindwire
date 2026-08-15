@@ -71,6 +71,16 @@ impl From<TransportError> for AppError {
                 "Could not reach the relay server. Please check your connection.",
                 true,
             ),
+            TransportError::TlsValidationFailed => Self::new(
+                "RELAY_IDENTITY_INVALID",
+                "The relay's certificate or security identity could not be verified.",
+                false,
+            ),
+            TransportError::PinStoreRequired => Self::new(
+                "PIN_STORE_FAILED",
+                "A secure custom relay requires persistent identity storage.",
+                false,
+            ),
             TransportError::HandshakeFailed => Self::new(
                 "HANDSHAKE_FAILED",
                 "The secure handshake failed. The server identity may have changed.",
@@ -81,9 +91,28 @@ impl From<TransportError> for AppError {
                 "Too many connection attempts. Please wait a moment before retrying.",
                 true,
             ),
-            TransportError::SessionTerminated | TransportError::PeerDisconnected => {
+            TransportError::SessionTerminated
+            | TransportError::PeerDisconnected
+            | TransportError::RoomBurned => {
                 Self::new("SESSION_ENDED", "The connection ended unexpectedly.", false)
             }
+            TransportError::VerificationRequired => Self::new(
+                "VERIFICATION_REQUIRED",
+                "Verify the peer before sending messages.",
+                false,
+            ),
+            TransportError::RecoveryUnavailable
+            | TransportError::StaleEpoch
+            | TransportError::InvalidResumeProof => Self::new(
+                "RECOVERY_FAILED",
+                "Authenticated session recovery failed.",
+                false,
+            ),
+            TransportError::UnexpectedApplicationEnvelope => Self::new(
+                "PROTOCOL_ERROR",
+                "A protocol error occurred. The session has been terminated.",
+                false,
+            ),
             TransportError::MessageTooLong => Self::new(
                 "MESSAGE_TOO_LONG",
                 "Your message exceeds the 4000 character limit.",

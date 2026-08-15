@@ -1,208 +1,235 @@
-//! End-to-end integration test for blindwire-transport with blindwire-server.
+#![allow(clippy::uninlined_format_args)]
+
+//! End-to-end integration tests for blindwire-transport with blindwire-server.
 
 use blindwire_server::run_server;
 use blindwire_transport::{SecureSession, TransportConfig, TransportError};
+use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-/// Full end-to-end test: connect, handshake, exchange messages.
-#[tokio::test]
-async fn test_full_session_e2e() {
-    // 1. Start server
+async fn start_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
     let addr = listener.local_addr().expect("no local addr");
-    let url = format!("ws://{}", addr);
-    println!("Server URL: {}", url);
-
     tokio::spawn(async move {
         run_server(listener).await;
     });
+    format!("ws://{addr}")
+}
 
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // 2. Create session ID
+/// Full public-API flow: confirmation gates success, messages work, and the invite is consumed.
+#[tokio::test]
+async fn test_full_session_e2e() {
+    let url = start_server().await;
     let session_id = [0xE2u8; 32];
-
-    // 3. Initiator connects FIRST (it will wait for peer in wait_for_peer())
-    //    Then responder connects, which triggers PEER_JOINED to initiator
-    //    Then both do handshake
     let initiator_url = url.clone();
     let responder_url = url.clone();
-
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     let initiator_handle = tokio::spawn(async move {
-        println!("Initiator connecting...");
         let config = TransportConfig::initiator(initiator_url, session_id).with_insecure_dev();
-        let mut session_res = SecureSession::connect(config).await;
-        if let Ok((ref mut s, Some(token))) = session_res {
-            tx.send(token).expect("send token");
-            if let Err(e) = s.handshake().await {
-                println!("Initiator handshake failed: {:?}", e);
-                return Err(e);
-            }
-        } else {
-            tx.send([0u8; 32]).unwrap();
-        }
-        session_res
+        let (mut session, token) = SecureSession::connect(config).await?;
+        tx.send(token.expect("initiator token"))
+            .expect("send token");
+        session.handshake().await?;
+        Ok::<_, TransportError>(session)
     });
 
-    let token = rx.await.expect("recv token");
-
-    // Spawn responder - this triggers PEER_JOINED to initiator
+    let token = rx.await.expect("receive token");
     let responder_handle = tokio::spawn(async move {
-        println!("Responder connecting...");
         let config =
             TransportConfig::responder(responder_url, session_id, token).with_insecure_dev();
-        let mut session_res = SecureSession::connect(config).await;
-        if let Ok((ref mut s, _)) = session_res {
-            if let Err(e) = s.handshake().await {
-                println!("Responder handshake failed: {:?}", e);
-                return Err(e);
-            }
-        }
-        session_res
+        let (mut session, _) = SecureSession::connect(config).await?;
+        session.handshake().await?;
+        Ok::<_, TransportError>(session)
     });
 
-    // Wait for both
-    let (i_result, r_result) = tokio::join!(initiator_handle, responder_handle);
+    let (initiator, responder) = tokio::time::timeout(Duration::from_secs(5), async {
+        let initiator = initiator_handle.await.expect("initiator task")?;
+        let responder = responder_handle.await.expect("responder task")?;
+        Ok::<_, TransportError>((initiator, responder))
+    })
+    .await
+    .expect("handshake timed out")
+    .expect("handshake failed");
+    let (mut initiator, mut responder) = (initiator, responder);
 
-    let (mut initiator, _) = i_result.expect("task panic").expect("initiator failed");
-    let (mut responder, _) = r_result.expect("task panic").expect("responder failed");
+    assert_eq!(initiator.fingerprint(), responder.fingerprint());
 
-    println!("Both connected!");
+    let replay = TransportConfig::responder(url.clone(), session_id, token).with_insecure_dev();
+    assert!(matches!(
+        SecureSession::connect(replay).await,
+        Err(TransportError::UnexpectedResponse(0x04))
+    ));
 
-    // 4. Verify fingerprints match
-    let i_fp = initiator.fingerprint().expect("no fingerprint");
-    let r_fp = responder.fingerprint().expect("no fingerprint");
-    println!("Initiator fingerprint: {}", i_fp);
-    println!("Responder fingerprint: {}", r_fp);
-    assert_eq!(i_fp, r_fp, "Fingerprints must match");
-
-    // 5. Bidirectional message exchange
-    println!("Testing bidirectional exchange...");
-
-    let (i_send, r_recv) = tokio::join!(
+    let (sent, received) = tokio::join!(
         initiator.send_text("Hello from initiator!"),
         responder.recv()
     );
-    i_send.expect("initiator send failed");
-    let msg = r_recv.expect("responder recv failed");
-    assert_eq!(msg.as_str().expect("utf8"), "Hello from initiator!");
-    println!("Responder received: {}", msg.as_str().unwrap());
+    sent.expect("initiator send failed");
+    assert_eq!(
+        received
+            .expect("responder receive failed")
+            .as_str()
+            .expect("utf8"),
+        "Hello from initiator!"
+    );
 
-    let (r_send, i_recv) = tokio::join!(responder.send_text("Hello back!"), initiator.recv());
-    r_send.expect("responder send failed");
-    let msg = i_recv.expect("initiator recv failed");
-    assert_eq!(msg.as_str().expect("utf8"), "Hello back!");
-    println!("Initiator received: {}", msg.as_str().unwrap());
+    let (sent, received) = tokio::join!(responder.send_text("Hello back!"), initiator.recv());
+    sent.expect("responder send failed");
+    assert_eq!(
+        received
+            .expect("initiator receive failed")
+            .as_str()
+            .expect("utf8"),
+        "Hello back!"
+    );
 
-    // 6. Clean termination
     initiator.burn();
     responder.burn();
-    println!("Test passed!");
+}
+
+/// A responder can vanish after Noise starts; the initiator must reset and accept a fresh peer.
+#[tokio::test]
+async fn initiator_restarts_noise_after_unconfirmed_responder_loss() {
+    let url = start_server().await;
+    let session_id = [0xE3u8; 32];
+    let config = TransportConfig::initiator(url.clone(), session_id).with_insecure_dev();
+    let (mut initiator, token) = SecureSession::connect(config)
+        .await
+        .expect("initiator connect");
+    let token = token.expect("initiator token");
+
+    let initiator_handle = tokio::spawn(async move {
+        let result = initiator.handshake().await;
+        (initiator, result)
+    });
+
+    let (mut interrupted, _) = connect_async(&url).await.expect("raw responder connect");
+    let mut join = vec![0x00, 0x72, 0x03];
+    join.extend_from_slice(&session_id);
+    join.extend_from_slice(&token);
+    interrupted
+        .send(Message::Binary(join))
+        .await
+        .expect("raw responder join");
+
+    loop {
+        let packet = tokio::time::timeout(Duration::from_secs(2), interrupted.next())
+            .await
+            .expect("initiator did not start Noise")
+            .expect("raw responder stream ended")
+            .expect("raw responder receive failed")
+            .into_data();
+        if packet.first() == Some(&0x01) {
+            break;
+        }
+    }
+    drop(interrupted);
+
+    let replacement_config = TransportConfig::responder(url, session_id, token).with_insecure_dev();
+    let (mut replacement, _) = SecureSession::connect(replacement_config)
+        .await
+        .expect("replacement connect");
+    let replacement_handle = tokio::spawn(async move {
+        let result = replacement.handshake().await;
+        (replacement, result)
+    });
+
+    let (initiator_join, replacement_join) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(initiator_handle, replacement_handle)
+    })
+    .await
+    .expect("replacement handshake timed out");
+    let (initiator, initiator_result) = initiator_join.expect("initiator task");
+    let (replacement, replacement_result) = replacement_join.expect("replacement task");
+    initiator_result.expect("initiator retry failed");
+    replacement_result.expect("replacement handshake failed");
+    assert_eq!(initiator.fingerprint(), replacement.fingerprint());
+}
+
+#[tokio::test]
+async fn handshake_has_one_thirty_second_deadline() {
+    let url = start_server().await;
+    let config = TransportConfig::initiator(url, [0xE4; 32]).with_insecure_dev();
+    let (mut initiator, _) = SecureSession::connect(config)
+        .await
+        .expect("initiator connect");
+
+    tokio::time::pause();
+    let handle = tokio::spawn(async move { initiator.handshake().await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+
+    if !handle.is_finished() {
+        handle.abort();
+        panic!("handshake did not honor a single 30-second deadline");
+    }
+    assert!(matches!(
+        handle.await.expect("handshake task"),
+        Err(TransportError::Timeout)
+    ));
 }
 
 /// Test Rate Limiting: 5 active connections per IP and 10 JOINs per minute limit.
 #[tokio::test]
 async fn test_rate_limiting() {
-    // 1. Start server
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind failed");
-    let addr = listener.local_addr().expect("no local addr");
-    let url = format!("ws://{}", addr);
-
-    tokio::spawn(async move {
-        run_server(listener).await;
-    });
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
+    let url = start_server().await;
     let session_id = [0xAAu8; 32];
-
-    // Part A: Test MAX_CONN_PER_IP (5)
-    println!("Testing connection limit (5)...");
     let mut handles = Vec::new();
-    for i in 0..5 {
-        println!("[TEST] Spawning initiator {} with unique session ID...", i);
-        let url_clone = url.clone();
-        let mut session_id_bg = session_id;
-        session_id_bg[0] = i as u8; // Make it unique
 
-        let handle = tokio::spawn(async move {
-            let config = TransportConfig::initiator(url_clone, session_id_bg).with_insecure_dev();
-            // Connect and then block on handshake to keep the connection open
-            if let Ok((mut s, _)) = SecureSession::connect(config).await {
-                let _ = s.handshake().await;
+    for i in 0..5 {
+        let url_clone = url.clone();
+        let mut unique_session_id = session_id;
+        unique_session_id[0] = i;
+        handles.push(tokio::spawn(async move {
+            let config =
+                TransportConfig::initiator(url_clone, unique_session_id).with_insecure_dev();
+            if let Ok((mut session, _)) = SecureSession::connect(config).await {
+                let _ = session.handshake().await;
             }
-        });
-        handles.push(handle);
+        }));
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    println!("[TEST] Attempting 6th connection (should fail)...");
-    let mut session_id_bg = session_id;
-    session_id_bg[0] = 99;
-    let config = TransportConfig::initiator(url.clone(), session_id_bg).with_insecure_dev();
+    let mut sixth_id = session_id;
+    sixth_id[0] = 99;
+    let sixth = TransportConfig::initiator(url.clone(), sixth_id).with_insecure_dev();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), SecureSession::connect(sixth)).await,
+        Ok(Err(TransportError::RateLimitExceeded))
+    ));
 
-    // Attempt 6th connection
-    let res = tokio::time::timeout(Duration::from_secs(5), SecureSession::connect(config)).await;
-
-    match res {
-        Ok(Err(TransportError::RateLimitExceeded)) => {
-            println!("[TEST] SUCCESS: Correctly received RateLimitExceeded on 6th connection");
-        }
-        Ok(res) => panic!(
-            "[TEST] FAILURE: Expected RateLimitExceeded on 6th connection, got {:?}",
-            res
-        ),
-        Err(_) => panic!("[TEST] FAILURE: Timeout waiting for RateLimitExceeded on 6th connection"),
+    for handle in handles {
+        handle.abort();
     }
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Part B: Test BURST limit (10 joins)
-    // We need to abort previous tasks to clear the server-side IP counter
-    for h in handles {
-        h.abort();
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await; // Wait for server to detect dead conns
-
-    println!("Testing burst limit (10 JOINs/min)...");
-    // We send 10 JOINs. Each will succeed but stay pending.
     let mut burst_handles = Vec::new();
     for i in 0..10 {
         let url_clone = url.clone();
-        let h = tokio::spawn(async move {
+        burst_handles.push(tokio::spawn(async move {
             let config = TransportConfig::initiator(url_clone, session_id).with_insecure_dev();
             let _ = SecureSession::connect(config).await;
-        });
-        burst_handles.push(h);
+        }));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        // The server limit is 5 conns, so we must drop some as we go to keep making connections
         if (i + 1) % 4 == 0 {
-            // Abort some handles to free up slots
-            if let Some(bh) = burst_handles.pop() {
-                bh.abort();
+            if let Some(handle) = burst_handles.pop() {
+                handle.abort();
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
-    // 11th JOIN attempt should fail with RateLimitExceeded
-    let config = TransportConfig::initiator(url.clone(), session_id).with_insecure_dev();
-    let res = tokio::time::timeout(Duration::from_secs(2), SecureSession::connect(config)).await;
-    match res {
-        Ok(Err(TransportError::RateLimitExceeded)) => {
-            println!("Correctly received RateLimitExceeded on 11th JOIN attempt");
-        }
-        Ok(res) => panic!(
-            "Expected RateLimitExceeded on 11th JOIN attempt, got {:?}",
-            res
-        ),
-        Err(_) => panic!("Timeout waiting for RateLimitExceeded on 11th JOIN"),
-    }
+    let eleventh = TransportConfig::initiator(url, session_id).with_insecure_dev();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), SecureSession::connect(eleventh)).await,
+        Ok(Err(TransportError::RateLimitExceeded))
+    ));
 
-    for h in burst_handles {
-        h.abort();
+    for handle in burst_handles {
+        handle.abort();
     }
 }

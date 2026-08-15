@@ -11,6 +11,10 @@ pub enum TransportError {
     // --- Connection & Setup ---
     /// Failed to establish WebSocket connection.
     ConnectionFailed(String),
+    /// TLS certificate or relay identity validation failed.
+    TlsValidationFailed,
+    /// A custom TLS relay using TOFU has no persistent pin-store path.
+    PinStoreRequired,
     /// Noise handshake failed.
     HandshakeFailed,
     /// Operation timed out.
@@ -25,6 +29,16 @@ pub enum TransportError {
     VersionMismatch,
     /// Rate limit exceeded on relay.
     RateLimitExceeded,
+    /// User verification is required before this operation.
+    VerificationRequired,
+    /// An application envelope is not valid for the current session phase.
+    UnexpectedApplicationEnvelope,
+    /// Authenticated recovery state is unavailable.
+    RecoveryUnavailable,
+    /// The recovery epoch is stale or does not advance exactly once.
+    StaleEpoch,
+    /// An authenticated resume proof did not match the fresh transcript.
+    InvalidResumeProof,
 
     // --- Validation Failures (Programmer Error / Terminal) ---
     /// Invalid message: contains NUL bytes.
@@ -37,6 +51,8 @@ pub enum TransportError {
     // --- Lifecycle & Transport ---
     /// Session has been terminated or burned.
     SessionTerminated,
+    /// The relay reported that the room was burned.
+    RoomBurned,
     /// WebSocket error.
     WebSocket(String),
     /// Peer disconnected gracefully or connection lost.
@@ -47,9 +63,12 @@ impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
+            Self::TlsValidationFailed => write!(f, "TLS validation failed"),
+            Self::PinStoreRequired => write!(f, "persistent relay pin storage is required"),
             Self::HandshakeFailed => write!(f, "handshake failed"),
             Self::Protocol(e) => write!(f, "protocol error: {e:?}"),
             Self::SessionTerminated => write!(f, "session terminated"),
+            Self::RoomBurned => write!(f, "room burned"),
             Self::Timeout => write!(f, "operation timed out"),
             Self::ContainsNul => write!(f, "message contains NUL bytes"),
             Self::MessageTooLong => write!(f, "message exceeds 4000 byte limit"),
@@ -59,6 +78,13 @@ impl fmt::Display for TransportError {
             Self::UnexpectedResponse(op) => write!(f, "unexpected server response: 0x{op:02x}"),
             Self::VersionMismatch => write!(f, "protocol version mismatch"),
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
+            Self::VerificationRequired => write!(f, "user verification required"),
+            Self::UnexpectedApplicationEnvelope => {
+                write!(f, "unexpected application envelope")
+            }
+            Self::RecoveryUnavailable => write!(f, "recovery unavailable"),
+            Self::StaleEpoch => write!(f, "stale recovery epoch"),
+            Self::InvalidResumeProof => write!(f, "invalid resume proof"),
         }
     }
 }
@@ -67,6 +93,9 @@ impl std::error::Error for TransportError {}
 
 impl From<blindwire_core::ProtocolError> for TransportError {
     fn from(e: blindwire_core::ProtocolError) -> Self {
-        Self::Protocol(e)
+        match e {
+            blindwire_core::ProtocolError::InvalidResumeProof => Self::InvalidResumeProof,
+            other => Self::Protocol(other),
+        }
     }
 }

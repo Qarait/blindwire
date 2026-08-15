@@ -1,29 +1,22 @@
 import { test, expect, chromium } from '@playwright/test';
-import { spawn } from 'child_process';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
-import { launchDesktop, waitForCDP, waitForAppPage } from './harness';
+import { getFreePort, killProcess, launchDesktop, waitForCDP, waitForAppPage } from './harness';
 
 let childProcess: any;
 let browser: any;
 let page: any;
+let userDataDir: string;
 
 test.beforeAll(async () => {
-    if (process.env.BLINDWIRE_ALLOW_REMOTE_DEBUG !== '1') {
-        throw new Error(
-            'BLINDWIRE_ALLOW_REMOTE_DEBUG=1 must be set to run packaged smoke tests.\n' +
-            'Never set this in production launch scripts or installed app shortcuts.'
-        );
-    }
-
-    const debugPort = 9222;
-    const userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bw-smoke-'));
+    const debugPort = await getFreePort();
+    userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'bw-smoke-'));
     childProcess = launchDesktop({ debugPort, userDataDir });
 
     await waitForCDP(debugPort, childProcess);
 
-    browser = await chromium.connectOverCDP(`http://localhost:${debugPort}`);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
     const defaultContext = browser.contexts()[0];
     
     page = await waitForAppPage(defaultContext);
@@ -33,10 +26,14 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
     if (browser) await browser.close();
-    if (childProcess) {
-        childProcess.kill();
-        // Windows usually needs tree-kill or forcefully killing the exe
-        try { spawn('taskkill', ['/pid', childProcess.pid.toString(), '/f', '/t']); } catch (e) { }
+    if (childProcess) killProcess(childProcess);
+    if (userDataDir) {
+        await fs.promises.rm(userDataDir, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 200,
+        });
     }
 });
 
@@ -49,7 +46,7 @@ test('packaged app smoke test: valid join loop', async () => {
 
     // 2. Inject a valid mock invite link.
     //    Token must be 43 chars of base64url (decodes to 32 bytes) to pass Rust validation.
-    //    Relay defaults to wss://relay.blindwire.io (official), so no relay needed for parse.
+    //    Relay defaults to wss://relay.blindwire.net (official), so no relay needed for parse.
     const fakeToken = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; // 43 chars, decodes to 32 zero-bytes
     const input = page.locator('input[placeholder="Paste blindwire:// link"]');
     await input.fill(`blindwire://join?v=1&r=testroom&t=${fakeToken}&e=9999999999999`);

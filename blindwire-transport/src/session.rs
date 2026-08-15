@@ -11,6 +11,7 @@
 
 use blindwire_core::frame::MessageType;
 use blindwire_core::state::{Session, SessionReceiveResult, SessionState};
+use std::time::Duration;
 
 use crate::config::{Role, TransportConfig};
 use crate::error::TransportError;
@@ -22,8 +23,33 @@ use crate::relay::RelayTransport;
 /// This is a hard protocol invariant (4000 bytes). This limit is chosen to ensure
 /// that any message (including framing and AEAD overhead) fits within a single
 /// 4096-byte MTU-friendly wire frame. Increasing this limit would require
+pub(crate) fn validate_signaling_url(config: &TransportConfig) -> Result<(), TransportError> {
+    let url = url::Url::parse(&config.signaling_url)
+        .map_err(|_| TransportError::ConnectionFailed("invalid signaling server URL".into()))?;
+
+    if url.scheme() == "wss" {
+        return Ok(());
+    }
+
+    let is_loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+
+    if cfg!(debug_assertions) && config.insecure_dev && url.scheme() == "ws" && is_loopback {
+        return Ok(());
+    }
+
+    Err(TransportError::ConnectionFailed(
+        "wss:// required; ws:// is limited to localhost debug builds".into(),
+    ))
+}
+
 /// re-evaluating the framing layer and potential fragmentation risks.
 const MAX_PLAINTEXT_SIZE: usize = 4000;
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A secure messaging session.
 ///
@@ -65,24 +91,12 @@ impl SecureSession {
     pub async fn connect(
         config: TransportConfig,
     ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
-        // Validate URL scheme
-        if !config.insecure_dev && !config.signaling_url.starts_with("wss://") {
-            return Err(TransportError::ConnectionFailed(
-                "wss:// required (use insecure_dev for local testing)".into(),
-            ));
-        }
+        validate_signaling_url(&config)?;
 
         // Connect to signaling server
         let (relay, token) = RelayTransport::connect(&config).await?;
 
-        // Create protocol session
-        let mut inner = match config.role {
-            Role::Initiator => Session::new_initiator()?,
-            Role::Responder => Session::new_responder()?,
-        };
-
-        // Mark as connected
-        inner.on_connected()?;
+        let inner = Self::new_protocol_session(config.role)?;
 
         Ok((
             Self {
@@ -95,14 +109,76 @@ impl SecureSession {
         ))
     }
 
-    /// Complete the connection by waiting for peer and performing handshake.
-    /// Initiator will block here until responder joins.
+    fn new_protocol_session(role: Role) -> Result<Session, TransportError> {
+        let mut session = match role {
+            Role::Initiator => Session::new_initiator()?,
+            Role::Responder => Session::new_responder()?,
+        };
+        session.on_connected()?;
+        Ok(session)
+    }
+
+    /// Complete Noise XX and wait for the relay's two-sided confirmation.
+    /// All responder attempts share this one 30-second deadline.
     pub async fn handshake(&mut self) -> Result<(), TransportError> {
-        if self.config.role == Role::Initiator {
-            self.relay.wait_for_peer().await?;
+        if self.terminated {
+            return Err(TransportError::SessionTerminated);
         }
 
-        Self::perform_handshake(&mut self.inner, &mut self.relay).await
+        let result = match tokio::time::timeout(
+            HANDSHAKE_DEADLINE,
+            self.handshake_until_confirmed(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(TransportError::Timeout),
+        };
+
+        if result.is_err() {
+            self.do_burn();
+        }
+        result
+    }
+
+    async fn handshake_until_confirmed(&mut self) -> Result<(), TransportError> {
+        loop {
+            if self.config.role == Role::Initiator {
+                match self.relay.wait_for_peer().await {
+                    Ok(()) => {}
+                    Err(TransportError::PeerDisconnected) => {
+                        self.reset_initiator_noise()?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            match Self::perform_handshake(&mut self.inner, &mut self.relay).await {
+                Ok(()) => {}
+                Err(TransportError::PeerDisconnected) if self.config.role == Role::Initiator => {
+                    self.reset_initiator_noise()?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+
+            self.relay.send_handshake_complete().await?;
+            match self.relay.wait_handshake_confirmed().await {
+                Ok(()) => return Ok(()),
+                Err(TransportError::PeerDisconnected) if self.config.role == Role::Initiator => {
+                    self.reset_initiator_noise()?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn reset_initiator_noise(&mut self) -> Result<(), TransportError> {
+        debug_assert_eq!(self.config.role, Role::Initiator);
+        self.inner.terminate();
+        self.inner = Self::new_protocol_session(Role::Initiator)?;
+        Ok(())
     }
 
     /// Perform the Noise_XX handshake.
@@ -292,6 +368,7 @@ impl SecureSession {
 impl Drop for SecureSession {
     fn drop(&mut self) {
         // Defensive burn if not already terminated
+
         self.do_burn();
     }
 }
@@ -311,5 +388,39 @@ mod tests {
     fn test_validation_length() {
         let err = TransportError::MessageTooLong;
         assert!(err.to_string().contains("4000"));
+    }
+    #[test]
+    fn secure_websocket_urls_are_accepted() {
+        let config = TransportConfig::initiator("wss://relay.blindwire.net", [0; 32]);
+        assert!(validate_signaling_url(&config).is_ok());
+    }
+
+    #[test]
+    fn insecure_remote_websocket_is_rejected_even_when_requested() {
+        let config =
+            TransportConfig::initiator("ws://example.com:8080", [0; 32]).with_insecure_dev();
+        assert!(validate_signaling_url(&config).is_err());
+    }
+
+    #[test]
+    fn insecure_local_websocket_depends_on_debug_build() {
+        for url in [
+            "ws://localhost:8080",
+            "ws://127.0.0.1:8080",
+            "ws://[::1]:8080",
+        ] {
+            let config = TransportConfig::initiator(url, [0; 32]).with_insecure_dev();
+            if cfg!(debug_assertions) {
+                assert!(validate_signaling_url(&config).is_ok(), "{url}");
+            } else {
+                assert!(validate_signaling_url(&config).is_err(), "{url}");
+            }
+        }
+    }
+
+    #[test]
+    fn insecure_local_websocket_requires_explicit_opt_in() {
+        let config = TransportConfig::initiator("ws://127.0.0.1:8080", [0; 32]);
+        assert!(validate_signaling_url(&config).is_err());
     }
 }

@@ -242,3 +242,17 @@ button.danger:hover {
 .chat-input-area button {
   width: auto;
 }
+.qr-container {
+  width: fit-content;
+  margin: 1.5rem auto;
+  padding: 1rem;
+  border-radius: 1rem;
+  background: #fff;
+  line-height: 0;
+}
+
+.qr-container svg {
+  display: block;
+  max-width: min(220px, 70vw);
+  height: auto;
+}

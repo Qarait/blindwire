@@ -91,9 +91,6 @@ async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), S
         InvitePayload::parse(invite_uri).map_err(|e| format!("invite parse failed: {e:?}"))?;
 
     println!("[SMOKE] Invite parsed");
-    println!("[SMOKE]   room     : {}", invite.room);
-    println!("[SMOKE]   relay    : {}", invite.relay_url);
-    println!("[SMOKE]   expires  : {}", invite.exp);
 
     // ── 2. Derive session_id — must match Tauri's session_id_from_room() ─────
     let session_id: [u8; 32] = {
@@ -146,7 +143,6 @@ async fn run_smoke(invite_uri: &str, expect_msg: Option<String>) -> Result<(), S
         "[SMOKE] SAS (verify this matches instance A): {}",
         emojis.join(" ")
     );
-    println!("[SMOKE] Fingerprint: {fingerprint_hex}");
 
     // ── 6. Wait for one inbound message from instance A ──────────────────────
     println!("[SMOKE] Waiting for message from instance A...");

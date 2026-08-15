@@ -22,14 +22,19 @@
 #![cfg_attr(not(test), deny(clippy::expect_used))]
 #![cfg_attr(not(test), deny(clippy::panic))]
 
+pub mod application;
+pub mod entropy;
 pub mod error;
 pub mod frame;
 /// Deep link and QR invite payload validation.
 pub mod invite;
 pub mod noise;
+/// Recovery continuity derivation, proofs, and ratcheting.
+pub mod recovery;
 pub mod sas;
 pub mod state;
 
+pub use application::{ApplicationEnvelope, MessageDeduplicator, MessageId};
 pub use error::ProtocolError;
 pub use frame::{Frame, MessageType};
 pub use noise::NoiseSession;

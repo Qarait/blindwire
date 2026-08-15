@@ -1,10 +1,14 @@
-use dashmap::DashMap;
+pub mod protocol;
+pub mod room;
+mod v4;
+
+use dashmap::{mapref::entry::Entry, DashMap};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -37,23 +41,34 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(5);
 const MAX_QUEUE_DEPTH: usize = 32;
 const MAX_CONN_PER_IP: usize = 5;
 const MAX_TOTAL_CONNECTIONS: usize = 1000;
+const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Packet format [Opcode:1][Length:2][Frame:N]
 // Hard limit: 1 + 2 + 4096 = 4099 bytes.
 const MAX_PACKET_SIZE: usize = 4099;
-const HANDSHAKE_FRAME_TYPE: u8 = 0x01;
 
-/// Fix D: Core opcodes only - errors use ERROR(0x05) + ErrorCode
+/// Signaling opcodes accepted from clients.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Opcode {
+enum ClientOpcode {
     Join = 0x00,
+    Relay = 0x01,
+    Quit = 0x02,
+    HandshakeComplete = 0x03,
+}
+
+/// Signaling opcodes emitted by the relay.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ServerOpcode {
     Relay = 0x01,
     PeerJoined = 0x02,
     PeerQuit = 0x03,
     Expired = 0x04,
     Error = 0x05,
     Token = 0x06,
+    HandshakeConfirmed = 0x07,
 }
 
 /// Fix D: Error codes for ERROR(0x05) payload
@@ -72,16 +87,13 @@ enum ErrorCode {
     Expired = 0x09,
 }
 
-impl Opcode {
+impl ClientOpcode {
     fn from_u8(b: u8) -> Option<Self> {
         match b {
             0x00 => Some(Self::Join),
             0x01 => Some(Self::Relay),
-            0x02 => Some(Self::PeerJoined),
-            0x03 => Some(Self::PeerQuit),
-            0x04 => Some(Self::Expired),
-            0x05 => Some(Self::Error),
-            0x06 => Some(Self::Token),
+            0x02 => Some(Self::Quit),
+            0x03 => Some(Self::HandshakeComplete),
             _ => None,
         }
     }
@@ -94,6 +106,8 @@ struct Session {
     last_activity: Instant,
     token: Option<[u8; 32]>,
     token_state: TokenState,
+    initiator_complete: bool,
+    responder_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,8 +120,32 @@ enum TokenState {
 type SessionMap = Arc<DashMap<String, Session>>;
 type IpConnMap = Arc<DashMap<IpAddr, usize>>;
 
+fn effective_client_ip(peer_ip: IpAddr, request: &Request) -> IpAddr {
+    if !peer_ip.is_loopback() {
+        return peer_ip;
+    }
+
+    request
+        .headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or(peer_ip)
+}
+
+fn decrement_ip_connection(ip_conns: &DashMap<IpAddr, usize>, ip: IpAddr) {
+    if let Entry::Occupied(mut entry) = ip_conns.entry(ip) {
+        if *entry.get() <= 1 {
+            entry.remove();
+        } else {
+            *entry.get_mut() -= 1;
+        }
+    }
+}
+
 pub async fn run_server(listener: TcpListener) {
     let sessions: SessionMap = Arc::new(DashMap::new());
+    let v4_rooms: v4::V4RoomMap = Arc::new(DashMap::new());
     let ip_conns: IpConnMap = Arc::new(DashMap::new());
     let ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>> = Arc::new(DashMap::new());
     let total_conns = Arc::new(AtomicUsize::new(0));
@@ -142,7 +180,7 @@ pub async fn run_server(listener: TcpListener) {
             // 1. Process TTL Expirations (with notification)
             for id in to_notify {
                 if let Some((_, session)) = sessions_clone.remove(&id) {
-                    let pkt = vec![Opcode::Expired as u8];
+                    let pkt = vec![ServerOpcode::Expired as u8];
                     if let Some(tx) = session.initiator_tx {
                         let _ = tx.try_send(pkt.clone());
                     }
@@ -159,25 +197,77 @@ pub async fn run_server(listener: TcpListener) {
         }
     });
 
+    let v4_rooms_cleanup = v4_rooms.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(get_cleanup_interval()));
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now();
+            let expired: Vec<[u8; 32]> = v4_rooms_cleanup
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .value()
+                        .lock()
+                        .ok()
+                        .filter(|state| state.room.is_expired(now))
+                        .map(|_| *entry.key())
+                })
+                .collect();
+
+            for room_id in expired {
+                if let Some((_, state)) = v4_rooms_cleanup.remove(&room_id) {
+                    if let Ok(state) = state.lock() {
+                        let packet = protocol::ServerPacket::Expired.encode();
+                        if let Some(tx) = &state.initiator_tx {
+                            let _ = tx.try_send(packet.clone());
+                        }
+                        if let Some(tx) = &state.responder_tx {
+                            let _ = tx.try_send(packet);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     while let Ok((stream, peer_addr)) = listener.accept().await {
         log::debug!("[SERVER] Accepted connection from {peer_addr}");
         let sessions = sessions.clone();
+        let v4_rooms = v4_rooms.clone();
         let ip_conns = ip_conns.clone();
         let ip_bursts = ip_bursts.clone();
         let total_conns = total_conns.clone();
 
         tokio::spawn(async move {
-            let ip = peer_addr.ip();
+            let peer_ip = peer_addr.ip();
+            let forwarded_ip = Arc::new(StdMutex::new(None));
+            let forwarded_ip_for_callback = forwarded_ip.clone();
 
-            // Perform handshake FIRST, then check limits
-            match accept_hdr_async(stream, |_req: &Request, res: Response| Ok(res)).await {
-                Ok(mut ws) => {
+            let handshake = tokio::time::timeout(
+                WEBSOCKET_HANDSHAKE_TIMEOUT,
+                accept_hdr_async(stream, move |req: &Request, res: Response| {
+                    if let Ok(mut slot) = forwarded_ip_for_callback.lock() {
+                        *slot = Some(effective_client_ip(peer_ip, req));
+                    }
+                    Ok(res)
+                }),
+            )
+            .await;
+
+            match handshake {
+                Ok(Ok(mut ws)) => {
+                    let ip = forwarded_ip
+                        .lock()
+                        .ok()
+                        .and_then(|guard| *guard)
+                        .unwrap_or(peer_ip);
                     // Global limit check
                     if total_conns.fetch_add(1, Ordering::SeqCst) >= MAX_TOTAL_CONNECTIONS {
                         total_conns.fetch_sub(1, Ordering::SeqCst);
                         let _ = ws
                             .send(Message::Binary(vec![
-                                Opcode::Error as u8,
+                                ServerOpcode::Error as u8,
                                 ErrorCode::RateLimitExceeded as u8,
                             ]))
                             .await;
@@ -190,7 +280,7 @@ pub async fn run_server(listener: TcpListener) {
                         if *entry >= MAX_CONN_PER_IP {
                             let _ = ws
                                 .send(Message::Binary(vec![
-                                    Opcode::Error as u8,
+                                    ServerOpcode::Error as u8,
                                     ErrorCode::RateLimitExceeded as u8,
                                 ]))
                                 .await;
@@ -201,17 +291,13 @@ pub async fn run_server(listener: TcpListener) {
                     }
 
                     // Proceed with connection
-                    let _ = handle_connection_ws(ws, sessions, ip, ip_bursts).await;
+                    let _ = handle_connection_ws(ws, sessions, ip, ip_bursts, v4_rooms).await;
 
                     // Cleanup
-                    ip_conns.entry(ip).and_modify(|c| {
-                        if *c > 0 {
-                            *c -= 1
-                        }
-                    });
+                    decrement_ip_connection(ip_conns.as_ref(), ip);
                     total_conns.fetch_sub(1, Ordering::SeqCst);
                 }
-                Err(_e) => {
+                Ok(Err(_)) | Err(_) => {
                     // Handshake failed
                 }
             }
@@ -224,6 +310,7 @@ async fn handle_connection_ws(
     sessions: SessionMap,
     ip: IpAddr,
     ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>>,
+    v4_rooms: v4::V4RoomMap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -231,7 +318,16 @@ async fn handle_connection_ws(
     let session_id;
     let role_byte;
 
-    if let Some(Ok(Message::Binary(data))) = ws_rx.next().await {
+    if let Ok(Some(Ok(Message::Binary(data)))) =
+        tokio::time::timeout(JOIN_TIMEOUT, ws_rx.next()).await
+    {
+        if data.len() >= 3
+            && (data[0] == ClientOpcode::Join as u8 || data[0] == 0x05)
+            && data[2] == 0x04
+        {
+            return v4::handle_connection_v4(ws_tx, ws_rx, data, v4_rooms).await;
+        }
+
         // Burst check
         {
             let now = Instant::now();
@@ -240,7 +336,7 @@ async fn handle_connection_ws(
             if bursts.len() >= 10 {
                 let _ = ws_tx
                     .send(Message::Binary(vec![
-                        Opcode::Error as u8,
+                        ServerOpcode::Error as u8,
                         ErrorCode::RateLimitExceeded as u8,
                     ]))
                     .await;
@@ -249,10 +345,13 @@ async fn handle_connection_ws(
             bursts.push(now);
         }
 
-        if (data.len() != 35 && data.len() != 67) || data[0] != Opcode::Join as u8 {
+        if (data.len() != 35 && data.len() != 67) || data[0] != ClientOpcode::Join as u8 {
             let error_code = ErrorCode::InvalidFormat;
             let _ = ws_tx
-                .send(Message::Binary(vec![Opcode::Error as u8, error_code as u8]))
+                .send(Message::Binary(vec![
+                    ServerOpcode::Error as u8,
+                    error_code as u8,
+                ]))
                 .await;
             return Ok(());
         }
@@ -260,10 +359,10 @@ async fn handle_connection_ws(
         role_byte = data[1];
         let version_byte = data[2];
 
-        if version_byte != 0x02 {
+        if version_byte != 0x03 {
             let _ = ws_tx
                 .send(Message::Binary(vec![
-                    Opcode::Error as u8,
+                    ServerOpcode::Error as u8,
                     ErrorCode::VersionMismatch as u8,
                 ]))
                 .await;
@@ -273,7 +372,7 @@ async fn handle_connection_ws(
         if role_byte != 0x69 && role_byte != 0x72 {
             let _ = ws_tx
                 .send(Message::Binary(vec![
-                    Opcode::Error as u8,
+                    ServerOpcode::Error as u8,
                     ErrorCode::InvalidFormat as u8,
                 ]))
                 .await;
@@ -286,7 +385,7 @@ async fn handle_connection_ws(
             if data.len() != 67 {
                 let _ = ws_tx
                     .send(Message::Binary(vec![
-                        Opcode::Error as u8,
+                        ServerOpcode::Error as u8,
                         ErrorCode::InvalidFormat as u8,
                     ]))
                     .await;
@@ -298,11 +397,13 @@ async fn handle_connection_ws(
 
             // Validate token
             if let Some(mut session) = sessions.get_mut(&session_id) {
-                if session.token_state == TokenState::Consumed || session.token != Some(join_token)
+                if session.initiator_tx.is_none()
+                    || session.token_state == TokenState::Consumed
+                    || session.token != Some(join_token)
                 {
                     let _ = ws_tx
                         .send(Message::Binary(vec![
-                            Opcode::Error as u8,
+                            ServerOpcode::Error as u8,
                             ErrorCode::Unauthorized as u8,
                         ]))
                         .await;
@@ -311,7 +412,7 @@ async fn handle_connection_ws(
                 if session.token_state == TokenState::Reserved || session.responder_tx.is_some() {
                     let _ = ws_tx
                         .send(Message::Binary(vec![
-                            Opcode::Error as u8,
+                            ServerOpcode::Error as u8,
                             ErrorCode::RoleTaken as u8,
                         ]))
                         .await;
@@ -321,18 +422,20 @@ async fn handle_connection_ws(
                 if Instant::now().duration_since(session.created_at) > get_session_ttl() {
                     let _ = ws_tx
                         .send(Message::Binary(vec![
-                            Opcode::Error as u8,
+                            ServerOpcode::Error as u8,
                             ErrorCode::Expired as u8,
                         ]))
                         .await;
                     return Ok(());
                 }
                 session.token_state = TokenState::Reserved;
+                session.initiator_complete = false;
+                session.responder_complete = false;
             } else {
                 // Room doesn't exist
                 let _ = ws_tx
                     .send(Message::Binary(vec![
-                        Opcode::Error as u8,
+                        ServerOpcode::Error as u8,
                         ErrorCode::Unauthorized as u8,
                     ]))
                     .await;
@@ -344,11 +447,7 @@ async fn handle_connection_ws(
     }
 
     let role = if role_byte == 0x69 { 'i' } else { 'r' };
-    log::info!(
-        "[SERVER] Processing JOIN: role={}, session={}",
-        role,
-        &session_id[..8]
-    ); // Truncated ID for privacy
+    log::debug!("[SERVER] Processing JOIN for role {role}");
 
     // Register in session map
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(MAX_QUEUE_DEPTH);
@@ -359,7 +458,7 @@ async fn handle_connection_ws(
     let mut ws_tx = ws_tx;
     tokio::spawn(async move {
         while let Some(pkt) = rx.recv().await {
-            let is_expired = pkt.first() == Some(&(Opcode::Expired as u8));
+            let is_expired = pkt.first() == Some(&(ServerOpcode::Expired as u8));
             if ws_tx.send(Message::Binary(pkt)).await.is_err() {
                 break;
             }
@@ -370,7 +469,7 @@ async fn handle_connection_ws(
         }
     });
 
-    {
+    if role == 'i' {
         let mut session = sessions.entry(session_id.clone()).or_insert(Session {
             initiator_tx: None,
             responder_tx: None,
@@ -378,52 +477,53 @@ async fn handle_connection_ws(
             last_activity: Instant::now(),
             token: None,
             token_state: TokenState::Available,
+            initiator_complete: false,
+            responder_complete: false,
         });
+        if session.token.is_some() || session.initiator_tx.is_some() {
+            let _ = tx.try_send(vec![ServerOpcode::Error as u8, ErrorCode::RoleTaken as u8]);
+            return Ok(());
+        }
+
+        let mut token = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut token);
+        session.last_activity = Instant::now();
+        session.token = Some(token);
+        session.token_state = TokenState::Available;
+        session.initiator_complete = false;
+        session.responder_complete = false;
+        session.initiator_tx = Some(tx.clone());
+
+        let mut token_packet = Vec::with_capacity(33);
+        token_packet.push(ServerOpcode::Token as u8);
+        token_packet.extend_from_slice(&token);
+        let _ = tx.try_send(token_packet);
+    } else {
+        let Some(mut session) = sessions.get_mut(&session_id) else {
+            let _ = tx.try_send(vec![
+                ServerOpcode::Error as u8,
+                ErrorCode::Unauthorized as u8,
+            ]);
+            return Ok(());
+        };
+        if session.initiator_tx.is_none() || session.token_state != TokenState::Reserved {
+            let _ = tx.try_send(vec![
+                ServerOpcode::Error as u8,
+                ErrorCode::Unauthorized as u8,
+            ]);
+            return Ok(());
+        }
+        if session.responder_tx.is_some() {
+            let _ = tx.try_send(vec![ServerOpcode::Error as u8, ErrorCode::RoleTaken as u8]);
+            return Ok(());
+        }
 
         session.last_activity = Instant::now();
-
-        if role == 'i' {
-            if session.initiator_tx.is_some() {
-                let _ = tx
-                    .send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])
-                    .await;
-                return Ok(());
-            }
-
-            // Mint token for Initiator
-            let mut token = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut token);
-            session.token = Some(token);
-            session.token_state = TokenState::Available;
-
-            // Send token to Initiator: [0x06][token:32]
-            let mut token_pkt = Vec::with_capacity(33);
-            token_pkt.push(Opcode::Token as u8);
-            token_pkt.extend_from_slice(&token);
-            let _ = tx.send(token_pkt).await;
-            session.initiator_tx = Some(tx.clone()); // We use clone for the loop
-            if let Some(ref peer_tx) = session.responder_tx {
-                let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
-                // Also notify the joiner that the peer is already here
-                let _ = tx.send(vec![Opcode::PeerJoined as u8]).await;
-            }
-        } else {
-            if session.responder_tx.is_some() {
-                if session.token_state == TokenState::Reserved {
-                    session.token_state = TokenState::Available;
-                }
-                let _ = tx
-                    .send(vec![Opcode::Error as u8, ErrorCode::RoleTaken as u8])
-                    .await;
-                return Ok(());
-            }
-            session.responder_tx = Some(tx.clone());
-            if let Some(ref peer_tx) = session.initiator_tx {
-                let _ = peer_tx.try_send(vec![Opcode::PeerJoined as u8]);
-                // Also notify the joiner that the peer is already here
-                let _ = tx.send(vec![Opcode::PeerJoined as u8]).await;
-            }
+        session.responder_tx = Some(tx.clone());
+        if let Some(peer) = &session.initiator_tx {
+            let _ = peer.try_send(vec![ServerOpcode::PeerJoined as u8]);
         }
+        let _ = tx.try_send(vec![ServerOpcode::PeerJoined as u8]);
     }
 
     // Relay loop
@@ -438,10 +538,10 @@ async fn handle_connection_ws(
                         if data.is_empty() { break; }
 
                         let opcode_byte = data[0];
-                        let opcode = match Opcode::from_u8(opcode_byte) {
+                        let opcode = match ClientOpcode::from_u8(opcode_byte) {
                             Some(o) => o,
                             None => {
-                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::UnknownOpcode as u8]).await;
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::UnknownOpcode as u8]).await;
                                 break;
                             }
                         };
@@ -451,41 +551,89 @@ async fn handle_connection_ws(
                             s.last_activity = Instant::now();
                         }
 
-                        if opcode == Opcode::Relay {
+                        match opcode {
+                        ClientOpcode::Relay => {
+                            debug_assert_eq!(opcode_byte, ServerOpcode::Relay as u8);
                             // Strict binary relay validation
                             if data.len() < 3 {
-                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break;
                             }
                             let proto_len = u16::from_be_bytes([data[1], data[2]]) as usize;
                             if !(1..=(MAX_PACKET_SIZE - 3)).contains(&proto_len) || data.len() != 3 + proto_len {
-                                let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
                                 break;
                             }
-                            let is_handshake_frame = data[3] == HANDSHAKE_FRAME_TYPE;
 
                             log::trace!("[SERVER] RELAY from {} (size: {})", role, data.len());
 
                             // Relay to peer
-                            if let Some(mut s) = sessions.get_mut(&session_id) {
+                            if let Some(s) = sessions.get_mut(&session_id) {
                                 let peer_tx = if role == 'i' { &s.responder_tx } else { &s.initiator_tx };
                                 if let Some(ptx) = peer_tx {
                                     if ptx.try_send(data).is_err() {
                                         // Queue Full
-                                        let _ = tx.send(vec![Opcode::Error as u8, ErrorCode::QueueFull as u8]).await;
+                                        let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::QueueFull as u8]).await;
                                         relay_result = Err("Queue full");
                                         break;
                                     }
-                                    if role == 'i'
-                                        && is_handshake_frame
-                                        && s.token_state == TokenState::Reserved
-                                    {
-                                        s.token_state = TokenState::Consumed;
+                                }
+                            }
+                        }
+                        ClientOpcode::Quit => {
+                            if data.len() != 1 {
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
+                            }
+                            break;
+                        }
+                        ClientOpcode::HandshakeComplete => {
+                            if data.len() != 1 {
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::InvalidFormat as u8]).await;
+                                break;
+                            }
+
+                            let mut valid = false;
+                            let mut confirm = None;
+                            if let Some(mut s) = sessions.get_mut(&session_id) {
+                                let registered = if role == 'i' {
+                                    s.initiator_tx.as_ref()
+                                } else {
+                                    s.responder_tx.as_ref()
+                                };
+                                if registered.is_some_and(|current| current.same_channel(&tx)) {
+                                    match s.token_state {
+                                        TokenState::Reserved => {
+                                            valid = true;
+                                            if role == 'i' {
+                                                s.initiator_complete = true;
+                                            } else {
+                                                s.responder_complete = true;
+                                            }
+                                            if s.initiator_complete && s.responder_complete {
+                                                s.token_state = TokenState::Consumed;
+                                                confirm = Some((s.initiator_tx.clone(), s.responder_tx.clone()));
+                                            }
+                                        }
+                                        TokenState::Consumed => valid = true,
+                                        TokenState::Available => {}
                                     }
                                 }
                             }
-                        } else if opcode == Opcode::PeerQuit || opcode_byte == 0x02 { // QUIT from client
+
+                            if !valid {
+                                let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::Unauthorized as u8]).await;
+                                break;
+                            }
+                            if let Some((Some(initiator), Some(responder))) = confirm {
+                                let packet = vec![ServerOpcode::HandshakeConfirmed as u8];
+                                let _ = initiator.try_send(packet.clone());
+                                let _ = responder.try_send(packet);
+                            }
+                        }
+                        ClientOpcode::Join => {
+                            let _ = tx.send(vec![ServerOpcode::Error as u8, ErrorCode::UnknownOpcode as u8]).await;
                             break;
+                        }
                         }
                     }
                     _ => break,
@@ -494,25 +642,35 @@ async fn handle_connection_ws(
         }
     }
     // Cleanup on disconnect
+    let mut remove_incomplete_room = false;
     if let Some(mut s) = sessions.get_mut(&session_id) {
-        if role == 'i' {
-            s.initiator_tx = None;
+        let registered = if role == 'i' {
+            s.initiator_tx.as_ref()
         } else {
-            s.responder_tx = None;
-            if s.token_state == TokenState::Reserved {
-                s.token_state = TokenState::Available;
+            s.responder_tx.as_ref()
+        };
+        if registered.is_some_and(|current| current.same_channel(&tx)) {
+            if role == 'i' {
+                s.initiator_tx = None;
+                if let Some(peer) = &s.responder_tx {
+                    let _ = peer.try_send(vec![ServerOpcode::PeerQuit as u8]);
+                }
+                remove_incomplete_room = s.token_state != TokenState::Consumed;
+            } else {
+                s.responder_tx = None;
+                if s.token_state == TokenState::Reserved {
+                    s.token_state = TokenState::Available;
+                    s.initiator_complete = false;
+                    s.responder_complete = false;
+                }
+                if let Some(peer) = &s.initiator_tx {
+                    let _ = peer.try_send(vec![ServerOpcode::PeerQuit as u8]);
+                }
             }
         }
-
-        // Notify peer of our departure (Quit or Kill)
-        let peer_tx = if role == 'i' {
-            &s.responder_tx
-        } else {
-            &s.initiator_tx
-        };
-        if let Some(ptx) = peer_tx {
-            let _ = ptx.try_send(vec![Opcode::PeerQuit as u8]);
-        }
+    }
+    if remove_incomplete_room {
+        sessions.remove(&session_id);
     }
 
     if let Err(e) = relay_result {
@@ -521,10 +679,47 @@ async fn handle_connection_ws(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn hash_id(id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(id);
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Truncated hash for privacy purposes inside server logs if enabled
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_reverse_proxy_may_supply_client_ip() {
+        let request = Request::builder()
+            .header("x-real-ip", "203.0.113.42")
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            effective_client_ip("127.0.0.1".parse().unwrap(), &request),
+            "203.0.113.42".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_client_cannot_spoof_forwarded_ip() {
+        let request = Request::builder()
+            .header("x-real-ip", "203.0.113.42")
+            .body(())
+            .unwrap();
+        let peer = "198.51.100.7".parse::<IpAddr>().unwrap();
+
+        assert_eq!(effective_client_ip(peer, &request), peer);
+    }
+
+    #[test]
+    fn final_ip_connection_decrement_removes_entry() {
+        let counts = DashMap::new();
+        let ip = "127.0.0.1".parse().unwrap();
+        counts.insert(ip, 2);
+
+        decrement_ip_connection(&counts, ip);
+        assert_eq!(counts.get(&ip).map(|count| *count), Some(1));
+
+        decrement_ip_connection(&counts, ip);
+        assert!(!counts.contains_key(&ip));
+
+        decrement_ip_connection(&counts, ip);
+        assert!(!counts.contains_key(&ip));
+    }
 }

@@ -72,12 +72,25 @@ impl std::error::Error for InviteError {}
 
 // Official relay canonical address
 /// Canonical hostname of the official BlindWire signaling relay.
-pub const OFFICIAL_RELAY_HOST: &str = "relay.blindwire.io";
-const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.io";
+pub const OFFICIAL_RELAY_HOST: &str = "relay.blindwire.net";
+/// Canonical secure WebSocket URL of the official BlindWire relay.
+pub const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.net";
 
 impl InvitePayload {
     /// Parses a raw blindwire:// deep link or QR string into a validated payload.
     pub fn parse(uri: &str) -> Result<Self, InviteError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self::parse_at(uri, now_ms)
+    }
+
+    /// Parses a raw invite using a caller-supplied clock value.
+    ///
+    /// Browser/WASM callers provide `Date.now()` because `SystemTime` is not
+    /// implemented by the browser target.
+    pub fn parse_at(uri: &str, now_ms: u64) -> Result<Self, InviteError> {
         let parsed_url = Url::parse(uri).map_err(|_| InviteError::InvalidUriFormat)?;
 
         if parsed_url.scheme() != "blindwire" {
@@ -148,13 +161,8 @@ impl InvitePayload {
             .map_err(|_| InviteError::InvalidEncoding("e"))?;
 
         // 3. Expiry validation (with 5 minute tolerance for local clock skew)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
         let skew_ms = 5 * 60 * 1000;
-        if now > exp + skew_ms {
+        if now_ms > exp + skew_ms {
             return Err(InviteError::ExpiredToken);
         }
 
@@ -262,8 +270,7 @@ fn is_base64url_unpadded(s: &str) -> bool {
 }
 
 fn matches_official_relay(url: &Url) -> bool {
-    // Official is wss://relay.blindwire.io (with or without internal ports/paths)
-    // To be strict, domain must be relay.blindwire.io exactly.
+    // The official relay hostname must match exactly.
     url.domain() == Some(OFFICIAL_RELAY_HOST)
 }
 
@@ -294,7 +301,7 @@ mod tests {
 
         assert_eq!(payload.room, "room123");
         assert_eq!(payload.relay_pin, None);
-        assert_eq!(payload.relay_url.as_str(), "wss://relay.blindwire.io/");
+        assert_eq!(payload.relay_url.as_str(), "wss://relay.blindwire.net/");
     }
 
     #[test]
@@ -350,10 +357,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64
             - (10 * 60 * 1000);
-        let uri = format!(
-            "blindwire://join?v=1&r=room1&t=token1234567890123&e={}",
-            past_exp
-        );
+        let uri = format!("blindwire://join?v=1&r=room1&t=token1234567890123&e={past_exp}");
         assert_eq!(InvitePayload::parse(&uri), Err(InviteError::ExpiredToken));
     }
 
@@ -384,7 +388,7 @@ mod tests {
 
         // Injecting a pin for the explicit official relay
         let uri_explicit = format!(
-            "{}&u=wss://relay.blindwire.io&p={}",
+            "{}&u=wss://relay.blindwire.net&p={}",
             base_valid_uri(),
             "A".repeat(43)
         );

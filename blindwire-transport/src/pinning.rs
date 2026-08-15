@@ -11,7 +11,7 @@
 //!
 //! # Official Server
 //!
-//! `relay.blindwire.io` is hard-pinned via `OFFICIAL_PINS` (current + optional next).
+//! `relay.blindwire.net` is hard-pinned via `OFFICIAL_PINS` (current + optional next).
 //! Any cert whose SPKI hash is not in `OFFICIAL_PINS` is rejected immediately.
 //! Additionally the presented cert SAN and validity period are checked.
 //!
@@ -24,7 +24,11 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 pub use blindwire_core::invite::OFFICIAL_RELAY_HOST;
 
@@ -53,7 +57,7 @@ pub enum PinError {
     TlsError(String),
     /// Could not extract SPKI from certificate DER.
     SpkiExtractionFailed,
-    /// Could not durably persist a first-use pin.
+    /// The persistent pin store could not be read or durably updated.
     PinPersistenceFailed(String),
 }
 
@@ -72,7 +76,7 @@ impl std::fmt::Display for PinError {
             PinError::TlsError(s) => write!(f, "TLS error: {s}"),
             PinError::SpkiExtractionFailed => write!(f, "could not extract SPKI from certificate"),
             PinError::PinPersistenceFailed(s) => {
-                write!(f, "could not persist first-use server pin: {s}")
+                write!(f, "could not access persistent server pins: {s}")
             }
         }
     }
@@ -84,6 +88,42 @@ impl From<PinError> for rustls::Error {
     }
 }
 
+/// Errors returned when resetting a persisted custom-relay pin.
+#[derive(Debug)]
+pub enum PinResetError {
+    /// The supplied relay URL is malformed or is not a secure WebSocket URL.
+    InvalidRelayUrl,
+    /// The official relay uses compile-time pins and cannot be reset by a user.
+    OfficialRelay,
+    /// The pin store could not be read or atomically updated.
+    Storage(std::io::Error),
+}
+
+impl std::fmt::Display for PinResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRelayUrl => write!(f, "invalid custom relay URL"),
+            Self::OfficialRelay => write!(f, "the official relay pin cannot be reset"),
+            Self::Storage(error) => write!(f, "could not update the relay pin store: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PinResetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for PinResetError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
 // ─── Pin Store ─────────────────────────────────────────────────────────────────
 
 /// Persistent SPKI pin storage (simple flat file: `"hostname:hex_hash\n"`).
@@ -91,55 +131,225 @@ impl From<PinError> for rustls::Error {
 /// Writes are **atomic** (write to tmp → rename) to avoid half-written state.
 #[derive(Debug)]
 pub struct DiskPinStore {
-    path: std::path::PathBuf,
+    path: Option<PathBuf>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl DiskPinStore {
     /// Create a new store at the given path.
-    pub fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
+    pub fn new(path: PathBuf) -> Self {
+        let write_lock = shared_pin_store_lock(&path);
+        Self {
+            path: Some(path),
+            write_lock,
+        }
+    }
+
+    /// Create a verifier store for connections that cannot enter TOFU mode.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            path: None,
+            write_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn path(&self) -> io::Result<&Path> {
+        self.path
+            .as_deref()
+            .ok_or_else(|| io::Error::other("persistent relay pin storage is not configured"))
+    }
+
+    fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, ()>> {
+        self.write_lock
+            .lock()
+            .map_err(|_| io::Error::other("relay pin store lock was poisoned"))
+    }
+
+    fn parent_directory(path: &Path) -> &Path {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    fn process_lock(path: &Path) -> io::Result<std::fs::File> {
+        let parent = Self::parent_directory(path);
+        std::fs::create_dir_all(parent)?;
+        let lock_path = path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+        Ok(lock_file)
+    }
+
+    fn validate_host(host: &str) -> io::Result<()> {
+        if host.is_empty() || host.contains(':') || host.contains('\n') || host.contains('\r') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid relay pin hostname",
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_pins(path: &Path) -> io::Result<BTreeMap<String, [u8; 32]>> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        let mut pins = BTreeMap::new();
+        for line in content.lines() {
+            let (stored_host, stored_hex) = line.split_once(':').ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "malformed relay pin store entry",
+                )
+            })?;
+            Self::validate_host(stored_host).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed relay pin hostname")
+            })?;
+            let mut hash = [0u8; 32];
+            hex::decode_to_slice(stored_hex, &mut hash).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "malformed relay pin hash")
+            })?;
+            if pins.insert(stored_host.to_owned(), hash).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate relay pin hostname",
+                ));
+            }
+        }
+        Ok(pins)
+    }
+
+    fn write_pins(path: &Path, pins: &BTreeMap<String, [u8; 32]>) -> io::Result<()> {
+        static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let parent = Self::parent_directory(path);
+        std::fs::create_dir_all(parent)?;
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid relay pin store path")
+        })?;
+
+        let mut content = String::new();
+        for (host, hash) in pins {
+            content.push_str(host);
+            content.push(':');
+            content.push_str(&hex::encode(hash));
+            content.push('\n');
+        }
+
+        let (mut temporary, temporary_path) = loop {
+            let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = format!(
+                ".{}.{}.{}.tmp",
+                file_name.to_string_lossy(),
+                std::process::id(),
+                suffix
+            );
+            let temporary_path = parent.join(name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+            {
+                Ok(file) => break (file, temporary_path),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+
+        let write_result = temporary
+            .write_all(content.as_bytes())
+            .and_then(|_| temporary.flush())
+            .and_then(|_| temporary.sync_all());
+        drop(temporary);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&temporary_path, path) {
+            let _ = std::fs::remove_file(&temporary_path);
+            return Err(error);
+        }
+
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     /// Get the pinned SPKI hash for a canonicalized hostname.
-    pub fn get_pin(&self, host: &str) -> Option<[u8; 32]> {
-        if !self.path.exists() {
-            return None;
-        }
-        let content = std::fs::read_to_string(&self.path).ok()?;
-        for line in content.lines() {
-            let (stored_host, stored_hex) = line.split_once(':')?;
-            if stored_host == host {
-                let mut hash = [0u8; 32];
-                hex::decode_to_slice(stored_hex, &mut hash).ok()?;
-                return Some(hash);
-            }
-        }
-        None
+    pub fn get_pin(&self, host: &str) -> io::Result<Option<[u8; 32]>> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
+        Ok(Self::load_pins(path)?.get(host).copied())
     }
 
     /// Atomically persist a new SPKI pin for the given canonicalized hostname.
     ///
     /// Uses write-to-temp + rename to avoid corruption under concurrent access
     /// or process crashes mid-write.
-    pub fn save_pin(&self, host: &str, hash: [u8; 32]) -> std::io::Result<()> {
-        // Read existing content
-        let mut content = if self.path.exists() {
-            std::fs::read_to_string(&self.path)?
-        } else {
-            String::new()
-        };
-        content.push_str(&format!("{}:{}\n", host, hex::encode(hash)));
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+    pub fn save_pin(&self, host: &str, hash: [u8; 32]) -> io::Result<()> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
+        let mut pins = Self::load_pins(path)?;
+        match pins.get(host) {
+            Some(existing) if existing == &hash => return Ok(()),
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "a different relay identity is already pinned for this hostname",
+                ));
+            }
+            None => {}
         }
-
-        // Atomic write: write to .tmp then rename
-        let tmp_path = self.path.with_extension("tmp");
-        std::fs::write(&tmp_path, &content)?;
-        std::fs::rename(&tmp_path, &self.path)
+        pins.insert(host.to_owned(), hash);
+        Self::write_pins(path, &pins)
     }
+
+    /// Atomically remove every persisted pin for one canonicalized hostname.
+    pub fn remove_pin(&self, host: &str) -> io::Result<bool> {
+        Self::validate_host(host)?;
+        let path = self.path()?;
+        let _guard = self.lock()?;
+        let _process_guard = Self::process_lock(path)?;
+        let mut pins = Self::load_pins(path)?;
+        if pins.remove(host).is_none() {
+            return Ok(false);
+        }
+        Self::write_pins(path, &pins)?;
+        Ok(true)
+    }
+}
+
+fn shared_pin_store_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let key = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let registry = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 // ─── Hostname canonicalization ─────────────────────────────────────────────────
@@ -163,6 +373,27 @@ pub(crate) fn canonicalize_host(host: &str) -> String {
         .unwrap_or(&lower);
     // Then strip trailing FQDN dot
     without_port.trim_end_matches('.').to_owned()
+}
+
+/// Remove a persisted pin for a custom secure-WebSocket relay.
+/// The official relay's compile-time pin policy cannot be reset.
+pub fn reset_server_pin(
+    path: impl AsRef<std::path::Path>,
+    relay_url: &str,
+) -> Result<bool, PinResetError> {
+    let url = url::Url::parse(relay_url).map_err(|_| PinResetError::InvalidRelayUrl)?;
+    if url.scheme() != "wss" {
+        return Err(PinResetError::InvalidRelayUrl);
+    }
+    let host = url.host_str().ok_or(PinResetError::InvalidRelayUrl)?;
+    let host = canonicalize_host(host);
+    if host == OFFICIAL_RELAY_HOST {
+        return Err(PinResetError::OfficialRelay);
+    }
+
+    DiskPinStore::new(path.as_ref().to_path_buf())
+        .remove_pin(&host)
+        .map_err(PinResetError::from)
 }
 
 // ─── SPKI extraction ───────────────────────────────────────────────────────────
@@ -244,14 +475,30 @@ pub struct BlindWireVerifier {
     official_domain: String,
     /// Persistent TOFU pin store for custom servers.
     store: Arc<DiskPinStore>,
+    /// Optional pin delivered in a validated custom-relay invite.
+    expected_pin: Option<[u8; 32]>,
+    /// Standard WebPKI verifier; pinning is applied only after it succeeds.
+    standard_verifier: Arc<dyn ServerCertVerifier>,
 }
 
 impl BlindWireVerifier {
-    pub fn new(official_domain: impl Into<String>, store: Arc<DiskPinStore>) -> Self {
+    pub fn new(
+        official_domain: impl Into<String>,
+        store: Arc<DiskPinStore>,
+        standard_verifier: Arc<dyn ServerCertVerifier>,
+    ) -> Self {
         Self {
             official_domain: official_domain.into(),
             store,
+            expected_pin: None,
+            standard_verifier,
         }
+    }
+
+    /// Require a specific SPKI pin for this connection.
+    pub fn with_expected_pin(mut self, pin: Option<[u8; 32]>) -> Self {
+        self.expected_pin = pin;
+        self
     }
 
     /// Exposed for tests (allows computing match-ready hashes without a real cert).
@@ -274,11 +521,19 @@ impl ServerCertVerifier for BlindWireVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
+        ocsp_response: &[u8],
+        now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        self.standard_verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+
         let raw_host = match server_name {
             ServerName::DnsName(dns) => dns.as_ref(),
             ServerName::IpAddress(_) => return Err(rustls::Error::UnsupportedNameType),
@@ -303,8 +558,20 @@ impl ServerCertVerifier for BlindWireVerifier {
             }
         }
 
+        if let Some(expected) = self.expected_pin {
+            if expected == pin {
+                validate_san(end_entity, raw_host)?;
+                return Ok(rustls::client::danger::ServerCertVerified::assertion());
+            }
+            return Err(PinError::IdentityChanged.into());
+        }
+
         // ── 2. Custom server (Auto-TOFU) ──────────────────────────────────────
-        if let Some(pinned) = self.store.get_pin(&host) {
+        let persisted = self
+            .store
+            .get_pin(&host)
+            .map_err(|error| PinError::PinPersistenceFailed(error.to_string()))?;
+        if let Some(pinned) = persisted {
             if pinned == pin {
                 // Pin matched — also validate the SAN covers this hostname.
                 validate_san(end_entity, raw_host)?;
@@ -328,12 +595,8 @@ impl ServerCertVerifier for BlindWireVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
+        self.standard_verifier
+            .verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -342,18 +605,12 @@ impl ServerCertVerifier for BlindWireVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
+        self.standard_verifier
+            .verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.standard_verifier.supported_verify_schemes()
     }
 }
 
@@ -361,8 +618,91 @@ impl ServerCertVerifier for BlindWireVerifier {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::uninlined_format_args
+    )]
     use super::*;
     use rustls_pki_types::{CertificateDer, DnsName};
+
+    #[derive(Debug)]
+    struct RejectExpiredVerifier;
+
+    impl ServerCertVerifier for RejectExpiredVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Expired,
+            ))
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Err(rustls::Error::General("unused in this test".into()))
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Err(rustls::Error::General("unused in this test".into()))
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            Vec::new()
+        }
+    }
+
+    #[derive(Debug)]
+    struct AcceptCertificateVerifier;
+
+    impl ServerCertVerifier for AcceptCertificateVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            Vec::new()
+        }
+    }
 
     // ── Hostname canonicalization ─────────────────────────────────────────────
 
@@ -386,7 +726,7 @@ mod tests {
         let store = DiskPinStore::new(tmp.path().join("pins.txt"));
         let hash = [0xAAu8; 32];
         store.save_pin("example.com", hash).unwrap();
-        let loaded = store.get_pin("example.com").unwrap();
+        let loaded = store.get_pin("example.com").unwrap().unwrap();
         assert_eq!(loaded, hash);
     }
 
@@ -398,10 +738,154 @@ mod tests {
         let hash2 = [0x22u8; 32];
         store.save_pin("a.com", hash1).unwrap();
         store.save_pin("b.com", hash2).unwrap();
-        assert_eq!(store.get_pin("a.com").unwrap(), hash1);
-        assert_eq!(store.get_pin("b.com").unwrap(), hash2);
+        assert_eq!(store.get_pin("a.com").unwrap().unwrap(), hash1);
+        assert_eq!(store.get_pin("b.com").unwrap().unwrap(), hash2);
         // tmp file should be gone after rename
         assert!(!tmp.path().join("pins.tmp").exists());
+    }
+
+    #[test]
+    fn malformed_pin_store_is_an_error_not_first_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        std::fs::write(&path, "custom.example:not-a-pin\n").unwrap();
+        let store = DiskPinStore::new(path);
+
+        let error = store
+            .get_pin("custom.example")
+            .expect_err("corruption must not be interpreted as an empty store");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn duplicate_pin_records_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        std::fs::write(
+            &path,
+            format!(
+                "custom.example:{}\ncustom.example:{}\n",
+                "11".repeat(32),
+                "22".repeat(32)
+            ),
+        )
+        .unwrap();
+        let store = DiskPinStore::new(path);
+
+        let error = store
+            .get_pin("custom.example")
+            .expect_err("duplicate identities must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn concurrent_store_instances_preserve_both_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        let first = DiskPinStore::new(path.clone());
+        let second = DiskPinStore::new(path);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let first_barrier = Arc::clone(&barrier);
+        let first_writer = std::thread::spawn(move || {
+            first_barrier.wait();
+            first.save_pin("first.example", [0x11; 32]).unwrap();
+        });
+        let second_writer = std::thread::spawn(move || {
+            barrier.wait();
+            second.save_pin("second.example", [0x22; 32]).unwrap();
+        });
+        first_writer.join().unwrap();
+        second_writer.join().unwrap();
+
+        let store = DiskPinStore::new(tmp.path().join("pins.txt"));
+        assert_eq!(store.get_pin("first.example").unwrap(), Some([0x11; 32]));
+        assert_eq!(store.get_pin("second.example").unwrap(), Some([0x22; 32]));
+    }
+    const PIN_STORE_CHILD_PATH: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_PATH";
+    const PIN_STORE_CHILD_READY: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_READY";
+    const PIN_STORE_CHILD_DONE: &str = "BLINDWIRE_TEST_PIN_STORE_CHILD_DONE";
+
+    #[test]
+    fn pin_store_subprocess_writer() {
+        let Some(path) = std::env::var_os(PIN_STORE_CHILD_PATH) else {
+            return;
+        };
+        let ready = std::env::var_os(PIN_STORE_CHILD_READY).unwrap();
+        let done = std::env::var_os(PIN_STORE_CHILD_DONE).unwrap();
+
+        std::fs::write(&ready, b"ready").unwrap();
+        DiskPinStore::new(PathBuf::from(path))
+            .save_pin("child.example", [0x33; 32])
+            .unwrap();
+        std::fs::write(done, b"done").unwrap();
+    }
+
+    #[test]
+    fn separate_process_waits_for_pin_store_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pins.txt");
+        let ready = tmp.path().join("child.ready");
+        let done = tmp.path().join("child.done");
+        let lock_path = path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock_file).unwrap();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("pinning::tests::pin_store_subprocess_writer")
+            .arg("--nocapture")
+            .env(PIN_STORE_CHILD_PATH, &path)
+            .env(PIN_STORE_CHILD_READY, &ready)
+            .env(PIN_STORE_CHILD_DONE, &done)
+            .spawn()
+            .unwrap();
+
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() && std::time::Instant::now() < ready_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !ready.exists() {
+            let _ = fs2::FileExt::unlock(&lock_file);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(ready.exists(), "subprocess writer did not become ready");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let wrote_while_locked = done.exists();
+        fs2::FileExt::unlock(&lock_file).unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(status.success(), "subprocess writer failed: {status}");
+        assert!(
+            !wrote_while_locked,
+            "a separate process wrote without waiting for the pin-store lock"
+        );
+        assert_eq!(
+            DiskPinStore::new(path).get_pin("child.example").unwrap(),
+            Some([0x33; 32])
+        );
+    }
+
+    #[test]
+    fn conflicting_write_cannot_replace_a_pinned_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DiskPinStore::new(tmp.path().join("pins.txt"));
+        store.save_pin("custom.example", [0x11; 32]).unwrap();
+
+        let error = store
+            .save_pin("custom.example", [0x22; 32])
+            .expect_err("a competing first-use write must fail closed");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(store.get_pin("custom.example").unwrap(), Some([0x11; 32]));
     }
 
     // ── Error codes ───────────────────────────────────────────────────────────
@@ -429,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_official_relay_configuration_has_no_placeholders() {
-        assert_eq!(OFFICIAL_RELAY_HOST, "relay.blindwire.io");
+        assert_eq!(OFFICIAL_RELAY_HOST, "relay.blindwire.net");
         assert!(!OFFICIAL_PINS.contains(&[0x11; 32]));
         assert!(!OFFICIAL_PINS.contains(&[0x22; 32]));
     }
@@ -438,7 +922,11 @@ mod tests {
     fn test_verifier_rejects_official_domain_with_wrong_pin() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
+        let verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            Arc::clone(&store),
+            Arc::new(AcceptCertificateVerifier),
+        );
         let server = ServerName::from(DnsName::try_from(OFFICIAL_RELAY_HOST).unwrap());
         // Any cert whose SPKI-SHA256 ∉ OFFICIAL_PINS → error
         let bad_cert = CertificateDer::from(vec![0xCC; 32]);
@@ -456,7 +944,11 @@ mod tests {
     fn test_tofu_pin_then_match_then_change_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, Arc::clone(&store));
+        let _verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            Arc::clone(&store),
+            Arc::new(AcceptCertificateVerifier),
+        );
 
         let cert_data = vec![0x55u8; 64];
         let cert = CertificateDer::from(cert_data.clone());
@@ -479,7 +971,11 @@ mod tests {
         // Changed cert → identity changed → rejected
         let evil_cert = CertificateDer::from(vec![0xEE; 32]);
         let store2 = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
-        let _verifier2 = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store2);
+        let _verifier2 = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            store2,
+            Arc::new(AcceptCertificateVerifier),
+        );
         // Its store has custom-test.io → expected_hash seeded above.
         // The evil cert would hash to something different (SPKI extraction will
         // fall through to General error), so let's just validate the store logic.
@@ -494,7 +990,7 @@ mod tests {
         let hash_a = [0xAAu8; 32];
         let hash_b = [0xBBu8; 32];
         store.save_pin("relay.example.com", hash_a).unwrap();
-        let loaded = store.get_pin("relay.example.com").unwrap();
+        let loaded = store.get_pin("relay.example.com").unwrap().unwrap();
         assert_eq!(loaded, hash_a);
         // Identity-change check: different hash → should trigger IdentityChanged
         let e = PinError::IdentityChanged;
@@ -514,7 +1010,7 @@ mod tests {
         store.save_pin(&key, hash).unwrap();
         // Look up with a differently-cased / port form — should find it after canonicalization
         let lookup_key = canonicalize_host("example.com:443");
-        assert_eq!(store.get_pin(&lookup_key), Some(hash));
+        assert_eq!(store.get_pin(&lookup_key).unwrap(), Some(hash));
     }
 
     // ── Real DER cert fixture tests ────────────────────────────────────────
@@ -635,12 +1131,39 @@ mod tests {
         std::fs::write(&parent_file, b"occupied").unwrap();
 
         let store = Arc::new(DiskPinStore::new(parent_file.join("pins.txt")));
-        let verifier = BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store);
+        let verifier = BlindWireVerifier::new(
+            OFFICIAL_RELAY_HOST,
+            store,
+            Arc::new(AcceptCertificateVerifier),
+        );
         let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
         let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
 
         let result = verifier.verify_server_cert(&cert, &[], &server, &[], UnixTime::now());
         let error = result.expect_err("TOFU must fail if the first-use pin cannot be stored");
-        assert!(error.to_string().contains("could not persist"));
+        assert!(error
+            .to_string()
+            .contains("could not access persistent server pins"));
+    }
+
+    #[test]
+    fn pin_match_does_not_override_expired_certificate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DiskPinStore::new(tmp.path().join("pins.txt")));
+        let cert = CertificateDer::from(RELAY_EXAMPLE_COM_DER);
+        let expected_pin = spki_sha256(&cert).unwrap();
+        let verifier =
+            BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store, Arc::new(RejectExpiredVerifier))
+                .with_expected_pin(Some(expected_pin));
+        let server = ServerName::from(DnsName::try_from("relay.example.com").unwrap());
+
+        let error = verifier
+            .verify_server_cert(&cert, &[], &server, &[], UnixTime::now())
+            .expect_err("ordinary certificate validity must run before pin acceptance");
+
+        assert!(matches!(
+            error,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+        ));
     }
 }

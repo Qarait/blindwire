@@ -35,6 +35,8 @@ pub struct TransportConfig {
     pub insecure_dev: bool,
     /// Path to persist TOFU pins (for custom servers)
     pub pins_path: Option<std::path::PathBuf>,
+    /// Optional SPKI-SHA256 pin supplied by a validated custom-relay invite.
+    pub expected_server_pin: Option<[u8; 32]>,
     /// Optional invitation token (required for Responder)
     pub token: Option<[u8; 32]>,
 }
@@ -47,6 +49,7 @@ impl TransportConfig {
             session_id,
             role: Role::Initiator,
             insecure_dev: false,
+            expected_server_pin: None,
             pins_path: None,
             token: None,
         }
@@ -65,12 +68,18 @@ impl TransportConfig {
             insecure_dev: false,
             pins_path: None,
             token: Some(token),
+            expected_server_pin: None,
         }
     }
 
     /// Set the path for persisting TOFU pins.
     pub fn with_pins_path(mut self, path: std::path::PathBuf) -> Self {
         self.pins_path = Some(path);
+        self
+    }
+    /// Require the relay certificate to match an invite-supplied SPKI pin.
+    pub fn with_server_pin(mut self, pin: [u8; 32]) -> Self {
+        self.expected_server_pin = Some(pin);
         self
     }
 

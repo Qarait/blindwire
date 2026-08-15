@@ -323,11 +323,8 @@ impl NoiseSession {
         self.peer_public = None;
     }
 
-    /// Compute session fingerprint for out-of-band verification.
-    ///
-    /// Returns first 8 bytes of SHA256(initiator_pub || responder_pub) as hex string.
-    /// Only available after handshake completes.
-    pub fn fingerprint(&self) -> Option<String> {
+    /// Compute the full session fingerprint.
+    pub fn fingerprint_bytes(&self) -> Option<[u8; 32]> {
         use sha2::{Digest, Sha256};
 
         let peer_pub = self.peer_public.as_ref()?;
@@ -340,9 +337,13 @@ impl NoiseSession {
             hasher.update(peer_pub);
             hasher.update(&self.keypair.public);
         }
-        let result = hasher.finalize();
+        Some(hasher.finalize().into())
+    }
 
-        Some(hex::encode(&result[..8])) // 16 hex chars
+    /// Compute the short session fingerprint for out-of-band verification.
+    pub fn fingerprint(&self) -> Option<String> {
+        self.fingerprint_bytes()
+            .map(|fingerprint| hex::encode(&fingerprint[..8]))
     }
 }
 

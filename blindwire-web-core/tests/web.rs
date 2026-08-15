@@ -160,6 +160,23 @@ fn web_sessions_require_relay_and_two_sided_user_confirmation() {
 }
 
 #[wasm_bindgen_test]
+fn handshake_completion_is_exposed_without_secret_state() {
+    let room = [0x53; 32];
+    let mut initiator = WebSession::new(b'i', &room, None).unwrap();
+    let mut responder = WebSession::new(b'r', &room, Some(vec![0x52; 32])).unwrap();
+    assert!(!initiator.is_handshake_complete());
+    assert!(!responder.is_handshake_complete());
+
+    let one = take_outbound(call(initiator.start_handshake().unwrap()));
+    let two = take_outbound(call(responder.receive_frame(&one).unwrap()));
+    let three = take_outbound(call(initiator.receive_frame(&two).unwrap()));
+    let _ = responder.receive_frame(&three).unwrap();
+
+    assert!(initiator.is_handshake_complete());
+    assert!(responder.is_handshake_complete());
+}
+
+#[wasm_bindgen_test]
 fn worker_snapshot_restores_only_into_authenticated_recovery() {
     let (mut initiator, mut responder) = established_sessions();
     let pending = call(initiator.send_text("pending across refresh").unwrap());
@@ -274,6 +291,7 @@ fn exported_session_methods_match_the_public_allowlist() {
         "confirm_user_verified",
         "constructor",
         "free",
+        "is_handshake_complete",
         "receive_frame",
         "recovery_snapshot_for_worker_storage",
         "relay_handshake_confirmed",

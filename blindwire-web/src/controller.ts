@@ -63,6 +63,17 @@ export function reduceControllerState(state: ControllerState, event: WorkerEvent
   const snapshot = reduceSnapshot(state.snapshot, event);
   switch (event.type) {
     case 'state':
+      if (event.snapshot.phase === 'idle') {
+        return {
+          ...state,
+          snapshot,
+          invite_uri: null,
+          invite_expires_at: null,
+          invite_preview: null,
+          verification: null,
+          messages: [],
+        };
+      }
       return { ...state, snapshot };
     case 'invite_ready':
       return {

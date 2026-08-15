@@ -124,6 +124,12 @@ impl WebSession {
         Self::new_inner(role, room, token).map_err(WebFailure::into_js)
     }
 
+    /// Report whether the Noise handshake has completed without exposing any
+    /// handshake bytes to JavaScript.
+    pub fn is_handshake_complete(&self) -> bool {
+        self.noise.is_handshake_complete()
+    }
+
     /// Start the Noise XX handshake. Only the initiator may call this method.
     pub fn start_handshake(&mut self) -> Result<JsValue, JsValue> {
         let result = (|| {

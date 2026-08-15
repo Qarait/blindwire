@@ -169,6 +169,17 @@ export type WebSocketLike = {
 
 export type WebSocketConstructor = new (url: string) => WebSocketLike;
 
+export type RelayLike = Pick<RelayClient,
+  | 'getInitialToken'
+  | 'nextEvent'
+  | 'sendFrame'
+  | 'sendHandshakeComplete'
+  | 'registerRecovery'
+  | 'burn'
+  | 'quit'
+  | 'close'
+>;
+
 type EventWaiter = {
   resolve: (event: RelayEvent) => void;
   reject: (error: Error) => void;
@@ -187,6 +198,7 @@ export class RelayClient {
   private readonly waiters: EventWaiter[] = [];
   private opened = false;
   private closed = false;
+  private initialToken: Uint8Array | null = null;
 
   private constructor(private readonly socket: WebSocketLike) {
     socket.binaryType = 'arraybuffer';
@@ -230,6 +242,9 @@ export class RelayClient {
     while (true) {
       const event = await client.nextEvent();
       if (event.type === expected) {
+        if (event.type === 'token') {
+          client.initialToken = event.token.slice();
+        }
         return client;
       }
       if (event.type === 'error') {
@@ -284,6 +299,17 @@ export class RelayClient {
 
   sendFrame(frame: Uint8Array): void {
     this.sendRaw(encodeClientPacket({ type: 'relay', frame }));
+  }
+
+  /** The initiator-only token received during the initial JOIN. */
+  getInitialToken(): Uint8Array {
+    if (!this.initialToken) {
+      throw new Error('RELAY_TOKEN_UNAVAILABLE');
+    }
+    const token = this.initialToken.slice();
+    this.initialToken.fill(0);
+    this.initialToken = null;
+    return token;
   }
 
   sendHandshakeComplete(): void {

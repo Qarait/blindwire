@@ -15,7 +15,7 @@ import {
 } from './relay';
 import { loadWasm, type WasmCallResult, type WasmEvent } from './wasm';
 
-const OFFICIAL_RELAY_URL = 'wss://relay.blindwire.net';
+const OFFICIAL_RELAY_URL = 'wss://relay.blindwire.tech';
 const INVITE_LIFETIME_MS = 60 * 60 * 1000;
 const RECOVERY_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOMAIN="relay.blindwire.net"
+DOMAIN="relay.blindwire.tech"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -95,7 +95,7 @@ certbot certonly \
   --email "${ACME_EMAIL}"
 
 install -o root -g root -m 0644 \
-  "${DEPLOY_DIR}/nginx/relay.blindwire.net.conf" \
+  "${DEPLOY_DIR}/nginx/relay.blindwire.tech.conf" \
   "/etc/nginx/sites-available/${DOMAIN}"
 
 install -d -o root -g root -m 0755 /etc/letsencrypt/renewal-hooks/deploy

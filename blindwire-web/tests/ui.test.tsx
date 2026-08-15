@@ -6,7 +6,7 @@ import { VerificationView } from '../src/components/VerificationView';
 
 describe('browser room UI', () => {
   it('renders the exact invite URI in the read-only input and QR value', () => {
-    const uri = 'blindwire://join?v=1&r=room&t=token&e=1890000000000&u=wss%3A%2F%2Frelay.blindwire.net';
+    const uri = 'blindwire://join?v=1&r=room&t=token&e=1890000000000&u=wss%3A%2F%2Frelay.blindwire.tech';
     render(<InviteView uri={uri} expiresAt={1890000000000} onCancel={vi.fn()} />);
     const input = screen.getByLabelText('Invite link');
     expect(input).toHaveValue(uri);

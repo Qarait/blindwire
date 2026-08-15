@@ -79,7 +79,7 @@ function makeHarness() {
   };
   const wasm: WasmApi = {
     generate_random_32: () => bytes(9),
-    parse_invite: () => ({ room: '', token: '', expires_at: Date.now() + 100000, relay_url: 'wss://relay.blindwire.net', relay_pin: null, official_relay: true }),
+    parse_invite: () => ({ room: '', token: '', expires_at: Date.now() + 100000, relay_url: 'wss://relay.blindwire.tech', relay_pin: null, official_relay: true }),
     WebSession: class {
       constructor() { return session; }
       static restore_worker_snapshot() { return session; }

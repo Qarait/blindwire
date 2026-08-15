@@ -5,7 +5,7 @@ const payload: RecoveryPayload = {
   snapshot: new Uint8Array([1, 2, 3]),
   capability: new Uint8Array([4, 5, 6]),
   epoch: 4n,
-  relay_url: 'wss://relay.blindwire.net',
+  relay_url: 'wss://relay.blindwire.tech',
   role: 'initiator',
   expires_at: 1_900_000_000_000,
 };
@@ -40,7 +40,7 @@ describe('encrypted recovery vault', () => {
     expect(record.iv).toHaveProperty('byteLength', 12);
     expect(record.ciphertext).toHaveProperty('byteLength');
     expect(JSON.stringify(record)).not.toContain('correct horse');
-    expect(new TextDecoder().decode(record.ciphertext as ArrayBuffer)).not.toContain('relay.blindwire.net');
+    expect(new TextDecoder().decode(record.ciphertext as ArrayBuffer)).not.toContain('relay.blindwire.tech');
     await expect(vault.load('wrong passphrase', 1_800_000_000_000)).rejects.toMatchObject({ code: 'RECOVERY_UNLOCK_FAILED' });
     await expect(vault.load('correct horse battery staple', 1_800_000_000_000)).resolves.toMatchObject({ epoch: 4n });
   });

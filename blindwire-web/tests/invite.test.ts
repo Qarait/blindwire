@@ -2,6 +2,7 @@ import {
   base64UrlDecode,
   base64UrlEncode,
   buildOfficialInviteUri,
+  buildInviteUri,
   toInvitePreview,
 } from '../src/invite';
 import { describe, expect, it } from 'vitest';
@@ -15,7 +16,7 @@ describe('browser invite helpers', () => {
     );
 
     expect(uri).toBe(
-      'blindwire://join?v=1&r=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&t=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI&e=1890000000000&u=wss%3A%2F%2Frelay.blindwire.net',
+      'blindwire://join?v=1&r=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&t=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI&e=1890000000000&u=wss%3A%2F%2Frelay.blindwire.tech',
     );
   });
 
@@ -30,14 +31,14 @@ describe('browser invite helpers', () => {
       room: 'A'.repeat(43),
       token: 'B'.repeat(43),
       expires_at: 1_890_000_000_000,
-      relay_url: 'wss://relay.blindwire.net/',
+      relay_url: 'wss://relay.blindwire.tech/',
       relay_pin: null,
       official_relay: true,
     });
 
     expect(preview).toEqual({
       room_label: 'AAAAAAAA…',
-      relay_label: 'relay.blindwire.net',
+      relay_label: 'relay.blindwire.tech',
       official_relay: true,
       expires_at: 1_890_000_000_000,
     });
@@ -51,5 +52,14 @@ describe('browser invite helpers', () => {
     expect(() => buildOfficialInviteUri(new Uint8Array(32), new Uint8Array(31), 1_890_000_000_000)).toThrow(
       'INVALID_INVITE_ARGUMENT',
     );
+  });
+
+  it('rejects the legacy relay hostname', () => {
+    expect(() => buildInviteUri(
+      new Uint8Array(32).fill(1),
+      new Uint8Array(32).fill(2),
+      1_890_000_000_000,
+      'wss://relay.blindwire.net',
+    )).toThrow('INVALID_INVITE_ARGUMENT');
   });
 });

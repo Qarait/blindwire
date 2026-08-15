@@ -51,7 +51,7 @@ describe('browser Worker controller', () => {
         phase: 'active',
         role: 'initiator',
         room_label: 'AAAA…',
-        relay_label: 'relay.blindwire.net',
+        relay_label: 'relay.blindwire.tech',
         local_verified: true,
         peer_verified: true,
         recovery_available: false,

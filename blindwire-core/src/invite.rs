@@ -79,6 +79,18 @@ pub const OFFICIAL_RELAY_URL: &str = "wss://relay.blindwire.net";
 impl InvitePayload {
     /// Parses a raw blindwire:// deep link or QR string into a validated payload.
     pub fn parse(uri: &str) -> Result<Self, InviteError> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self::parse_at(uri, now_ms)
+    }
+
+    /// Parses a raw invite using a caller-supplied clock value.
+    ///
+    /// Browser/WASM callers provide `Date.now()` because `SystemTime` is not
+    /// implemented by the browser target.
+    pub fn parse_at(uri: &str, now_ms: u64) -> Result<Self, InviteError> {
         let parsed_url = Url::parse(uri).map_err(|_| InviteError::InvalidUriFormat)?;
 
         if parsed_url.scheme() != "blindwire" {
@@ -149,13 +161,8 @@ impl InvitePayload {
             .map_err(|_| InviteError::InvalidEncoding("e"))?;
 
         // 3. Expiry validation (with 5 minute tolerance for local clock skew)
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
         let skew_ms = 5 * 60 * 1000;
-        if now > exp + skew_ms {
+        if now_ms > exp + skew_ms {
             return Err(InviteError::ExpiredToken);
         }
 

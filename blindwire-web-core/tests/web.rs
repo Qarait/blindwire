@@ -2,7 +2,7 @@ use blindwire_core::noise::Role;
 use blindwire_core::recovery::{
     compute_resume_proof, derive_continuity_secret, ratchet_continuity_secret,
 };
-use blindwire_web_core::{generate_random_32, WebSession};
+use blindwire_web_core::{generate_random_32, parse_invite, WebSession};
 use serde::Deserialize;
 use wasm_bindgen_test::*;
 
@@ -42,6 +42,16 @@ struct CallResult {
 }
 
 #[derive(Debug, Deserialize)]
+struct InviteDescriptor {
+    room: String,
+    token: String,
+    expires_at: u64,
+    relay_url: String,
+    relay_pin: Option<String>,
+    official_relay: bool,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TestEvent {
     Outbound {
@@ -62,6 +72,40 @@ enum TestEvent {
     Recovering,
     Recovered,
     Burned,
+}
+
+#[wasm_bindgen_test]
+fn parse_invite_returns_validated_worker_descriptor() {
+    let exp = (js_sys::Date::now() as u64) + 3_600_000;
+    let uri = format!(
+        "blindwire://join?v=1&r=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&t=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&e={exp}"
+    );
+    let descriptor: InviteDescriptor =
+        serde_wasm_bindgen::from_value(parse_invite(&uri).unwrap()).unwrap();
+    assert_eq!(descriptor.room.len(), 43);
+    assert_eq!(descriptor.token.len(), 43);
+    assert_eq!(descriptor.expires_at, exp);
+    assert_eq!(descriptor.relay_url, "wss://relay.blindwire.net/");
+    assert_eq!(descriptor.relay_pin, None);
+    assert!(descriptor.official_relay);
+}
+
+#[wasm_bindgen_test]
+fn parse_invite_rejects_malformed_fields_with_a_public_error() {
+    let exp = (js_sys::Date::now() as u64) + 3_600_000;
+    let uri = format!(
+        "blindwire://join?v=1&r=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&t=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB&e={exp}&v=1"
+    );
+    assert_code(parse_invite(&uri), "INVITE_INVALID");
+}
+
+#[wasm_bindgen_test]
+fn worker_checkpoint_does_not_consume_the_live_session() {
+    let (mut initiator, _responder) = established_sessions();
+    let snapshot = initiator.copy_worker_snapshot_for_storage(10_000).unwrap();
+    assert!(!snapshot.is_empty());
+    let result = call(initiator.send_text("still active").unwrap());
+    assert!(result.message_id.is_some());
 }
 
 #[wasm_bindgen_test]
@@ -226,6 +270,7 @@ fn exported_session_methods_match_the_public_allowlist() {
         "accept_resume_proof",
         "begin_recovery",
         "burn",
+        "copy_worker_snapshot_for_storage",
         "confirm_user_verified",
         "constructor",
         "free",

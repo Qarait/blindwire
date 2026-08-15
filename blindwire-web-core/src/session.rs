@@ -230,6 +230,13 @@ impl WebSession {
         result.map_err(WebFailure::into_js)
     }
 
+    /// Copy a live session into a worker-only recovery snapshot without
+    /// terminating the current session.
+    pub fn copy_worker_snapshot_for_storage(&self, expires_at_ms: u64) -> Result<Vec<u8>, JsValue> {
+        self.encode_worker_snapshot_copy(expires_at_ms)
+            .map_err(WebFailure::into_js)
+    }
+
     /// Restore a worker-decrypted snapshot into recovery-only state.
     pub fn restore_worker_snapshot(snapshot: &[u8], now_ms: u64) -> Result<WebSession, JsValue> {
         Self::decode_worker_snapshot(snapshot, now_ms).map_err(WebFailure::into_js)
@@ -457,6 +464,33 @@ impl WebSession {
             .take()
             .ok_or_else(|| WebFailure::state("RECOVERY_UNAVAILABLE", "recovery unavailable"))?;
         let secret = continuity.into_worker_snapshot_secret();
+        self.encode_worker_snapshot_payload(secret, expires_at_ms)
+    }
+
+    fn encode_worker_snapshot_copy(&self, expires_at_ms: u64) -> Result<Vec<u8>, WebFailure> {
+        self.ensure_live()?;
+        if self.recovery.is_some()
+            || !self.local_verified
+            || !self.peer_verified
+            || expires_at_ms == 0
+        {
+            return Err(WebFailure::state(
+                "RECOVERY_UNAVAILABLE",
+                "recovery unavailable",
+            ));
+        }
+        let continuity = self
+            .continuity
+            .as_ref()
+            .ok_or_else(|| WebFailure::state("RECOVERY_UNAVAILABLE", "recovery unavailable"))?;
+        self.encode_worker_snapshot_payload(continuity.worker_snapshot_secret_copy(), expires_at_ms)
+    }
+
+    fn encode_worker_snapshot_payload(
+        &self,
+        secret: Zeroizing<[u8; 32]>,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, WebFailure> {
         let pending_count = u16::try_from(self.pending.len())
             .map_err(|_| WebFailure::state("SNAPSHOT_TOO_LARGE", "snapshot too large"))?;
         let received_count = u16::try_from(self.received_ids.len())

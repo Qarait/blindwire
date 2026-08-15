@@ -20,9 +20,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// A session recovery continuity secret.
 ///
-/// The secret is zeroized on drop and intentionally provides no cloning or
-/// formatting interface. The optional worker snapshot feature adds only a
-/// consuming, zeroizing codec for an encrypted worker vault.
+/// The secret is zeroized on drop and intentionally provides no public Clone or
+/// formatting interface. The optional worker snapshot feature adds only
+/// zeroizing codecs for an encrypted worker vault.
 pub struct ContinuitySecret(Zeroizing<[u8; SECRET_LENGTH]>);
 
 #[cfg(feature = "worker-recovery-snapshot")]
@@ -30,6 +30,12 @@ impl ContinuitySecret {
     /// Consume this secret into the worker-only recovery snapshot codec.
     pub fn into_worker_snapshot_secret(self) -> Zeroizing<[u8; SECRET_LENGTH]> {
         self.0
+    }
+
+    /// Copy the secret into a temporary zeroized buffer for a non-consuming
+    /// browser worker checkpoint.
+    pub fn worker_snapshot_secret_copy(&self) -> Zeroizing<[u8; SECRET_LENGTH]> {
+        Zeroizing::new(*self.0)
     }
 
     /// Restore a secret from a decrypted worker-only recovery snapshot.

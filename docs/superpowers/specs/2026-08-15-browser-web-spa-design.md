@@ -31,7 +31,9 @@ WebSocket relay client, encrypted IndexedDB vault, and React UI.
    text messaging, explicit burn, leave, and peer-disconnect states.
 5. Support an explicit passphrase-protected recovery checkpoint stored as
    AES-GCM ciphertext in IndexedDB, followed by authenticated recovery over a
-   fresh Noise session.
+   fresh Noise session. The WASM boundary includes a Worker-only
+   non-consuming checkpoint export so the record remains usable after the
+   current session continues.
 6. Produce a static `dist/` bundle with a restrictive CSP and no remote
    scripts, fonts, images, or runtime server requirement.
 7. Test the Worker/controller boundary and browser UI in Chromium and Firefox.
@@ -64,7 +66,10 @@ React UI  <-- typed public events/commands -->  Dedicated Worker
 ```
 
 React renders public state and accepts user actions only. It never imports
-WebSocket, WASM, IndexedDB, Web Crypto, or invite/token parsing code.
+WebSocket, WASM, IndexedDB, Web Crypto, or invite/token parsing code. The
+single exception is the exact canonical invite URI emitted for sharing: React
+may render that string as text/QR, but it may not parse, log, persist, or
+receive the room/token fields separately.
 
 The Worker owns one session generation at a time. Every asynchronous relay
 event is ignored after the generation is replaced or terminated. A malformed
@@ -153,9 +158,11 @@ type RoomSnapshot = {
 };
 ```
 
-`room_label` is a display-safe truncated identifier. The invite token,
-capability, room bytes, relay pin, snapshot bytes, ciphertext, and raw relay
-packets never cross this boundary.
+`room_label` is a display-safe truncated identifier. The invite token is
+present only inside the exact one-time `invite_ready.uri` display/share value;
+it is never exposed as a separate field, parsed, logged, or persisted by
+React. Capabilities, room bytes, relay pins, snapshot bytes, ciphertext, and
+raw relay packets never cross this boundary.
 
 ## Session lifecycle
 
@@ -198,7 +205,8 @@ clears the recovery record, and returns to `idle`.
 Recovery is explicit and user initiated. `enable_recovery` is available only
 after both users verify the SAS:
 
-1. WASM consumes the active session into its worker-only recovery snapshot.
+1. WASM copies the active continuity, pending-message, and deduplication state
+   into a Worker-only recovery snapshot without changing the live session.
 2. The Worker combines that opaque snapshot with the relay URL, role, current
    epoch, and recovery capability into a vault payload.
 3. Web Crypto derives an AES-GCM key from the supplied passphrase using a
@@ -206,22 +214,24 @@ after both users verify the SAS:
    random 12-byte IV encrypts the payload.
 4. IndexedDB stores only `{version, salt, iv, ciphertext}` under one fixed
    vault record. The passphrase and plaintext payload are not stored.
-5. The Worker reconnects using the stored capability and current epoch,
-   starts the fresh WASM recovery handshake, buffers any resume-proof frame
-   until relay handshake confirmation, and then completes authenticated
-   recovery and continuity ratcheting.
-6. After successful immediate recovery, the Worker returns to `active` and
-   marks recovery as available. The stored checkpoint is intentionally a
-   point-in-time checkpoint; the user can replace it by enabling recovery
-   again. A failed or stale checkpoint is deleted after a terminal auth/expiry
-   failure.
+5. The live session remains `active`; the checkpoint is used only after a
+   later disconnect or reload. The Worker reconnects using the stored
+   capability and current epoch, starts the fresh WASM recovery handshake,
+   buffers any resume-proof frame until relay handshake confirmation, and then
+   completes authenticated recovery and continuity ratcheting.
+6. After successful recovery, the Worker registers a fresh capability, creates
+   a new non-consuming snapshot at the new epoch, and replaces the encrypted
+   vault record using the passphrase that was supplied for this resume. A
+   failed or stale checkpoint is deleted after a terminal auth/expiry failure.
 
 On Worker startup, the presence of a vault record emits only
 `recovery_available`. `resume_recovery` asks for the passphrase inside the
 Worker, decrypts and validates the envelope, reconnects to the recorded
 official relay, and completes the same authenticated recovery sequence. A bad
 passphrase produces a generic public error and does not reveal whether any
-part of the ciphertext was valid.
+part of the ciphertext was valid. A connected peer that responds to
+`PeerResuming` clears its old checkpoint after recovery because its passphrase
+is not retained; that user can create a fresh checkpoint explicitly.
 
 ## Signaling-v4 browser relay
 
@@ -278,8 +288,10 @@ connect-src 'self' wss:;
 ```
 
 Production must not add `ws:` to `connect-src`, must not add `unsafe-inline`
-or `unsafe-eval`, and must not load remote scripts/fonts/images. The app's
-security test checks the generated HTML and source tree for these regressions.
+or `unsafe-eval`, and must not load remote scripts/fonts/images. Vite may add a
+dev-server-only `ws://localhost` allowance to served test HTML; the generated
+production `dist/index.html` must retain the production CSP. The app's
+security test checks the generated HTML for these regressions.
 
 ## Testing strategy
 
@@ -310,8 +322,10 @@ This slice is accepted only when:
 
 - `blindwire-web/` builds as a static SPA without Tauri imports;
 - all relay and WASM interaction is Worker-owned;
-- React receives no capability, token, room bytes, relay pin, snapshot,
-  ciphertext, or raw relay packet;
+- React receives no capability, separate token field, room bytes, relay pin,
+  snapshot, ciphertext, or raw relay packet. The exact canonical invite URI is
+  allowed only for immediate text/QR sharing and is never parsed or persisted
+  by React;
 - no plaintext recovery payload is persisted in IndexedDB;
 - the browser UI completes the two-sided verification gate before chat;
 - burn is irreversible and removes the vault record;
@@ -339,5 +353,6 @@ This slice is accepted only when:
 The Worker API intentionally isolates likely future changes. A later slice can
 replace the static host, add browser-verifiable custom relay identity, change
 the vault KDF, or swap React without changing the Rust protocol or exposing
-secrets to the UI. The checkpoint semantics can also become automatic if the
-WASM boundary gains a safe non-consuming snapshot contract.
+secrets to the UI. The explicit checkpoint can become automatic later because
+the Worker-only non-consuming snapshot contract is already isolated behind the
+WASM adapter.

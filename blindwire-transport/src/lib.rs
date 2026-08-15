@@ -38,4 +38,4 @@ pub use error::TransportError;
 pub use message::Message;
 pub use pinning::{reset_server_pin, PinResetError};
 pub use session::SecureSession;
-pub use session_v21::{SecureSessionV21, SessionEventV21};
+pub use session_v21::{RecoverySnapshotV21, SecureSessionV21, SessionEventV21};

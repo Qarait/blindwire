@@ -35,6 +35,10 @@ pub enum TransportError {
     UnexpectedApplicationEnvelope,
     /// Authenticated recovery state is unavailable.
     RecoveryUnavailable,
+    /// The recovery epoch is stale or does not advance exactly once.
+    StaleEpoch,
+    /// An authenticated resume proof did not match the fresh transcript.
+    InvalidResumeProof,
 
     // --- Validation Failures (Programmer Error / Terminal) ---
     /// Invalid message: contains NUL bytes.
@@ -79,6 +83,8 @@ impl fmt::Display for TransportError {
                 write!(f, "unexpected application envelope")
             }
             Self::RecoveryUnavailable => write!(f, "recovery unavailable"),
+            Self::StaleEpoch => write!(f, "stale recovery epoch"),
+            Self::InvalidResumeProof => write!(f, "invalid resume proof"),
         }
     }
 }
@@ -87,6 +93,9 @@ impl std::error::Error for TransportError {}
 
 impl From<blindwire_core::ProtocolError> for TransportError {
     fn from(e: blindwire_core::ProtocolError) -> Self {
-        Self::Protocol(e)
+        match e {
+            blindwire_core::ProtocolError::InvalidResumeProof => Self::InvalidResumeProof,
+            other => Self::Protocol(other),
+        }
     }
 }

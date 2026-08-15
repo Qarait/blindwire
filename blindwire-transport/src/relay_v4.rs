@@ -65,7 +65,7 @@ pub(crate) enum RelayEventV4 {
 
 /// Native WebSocket transport for signaling-v4.
 pub(crate) struct RelayTransportV4 {
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 }
 
 impl std::fmt::Debug for RelayTransportV4 {
@@ -82,7 +82,7 @@ impl RelayTransportV4 {
         config: &TransportConfig,
     ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
         let ws = connect_websocket(config).await?;
-        let mut transport = Self { ws };
+        let mut transport = Self { ws: Some(ws) };
         transport.send_raw(encode_initial_join(config)).await?;
         match (config.role, transport.recv_event().await?) {
             (Role::Initiator, RelayEventV4::Token(token)) => Ok((transport, Some(token))),
@@ -99,7 +99,7 @@ impl RelayTransportV4 {
         epoch: u64,
     ) -> Result<Self, TransportError> {
         let ws = connect_websocket(config).await?;
-        let mut transport = Self { ws };
+        let mut transport = Self { ws: Some(ws) };
         transport
             .send_raw(encode_resume(config, capability, epoch))
             .await?;
@@ -157,8 +157,16 @@ impl RelayTransportV4 {
 
     /// Send a quit control and close the WebSocket.
     pub(crate) async fn close(&mut self) {
-        let _ = self.send_raw(vec![opcode::QUIT]).await;
-        let _ = self.ws.close(None).await;
+        if self.ws.is_some() {
+            let _ = self.send_raw(vec![opcode::QUIT]).await;
+            if let Some(ws) = self.ws.as_mut() {
+                let _ = ws.close(None).await;
+            }
+        }
+    }
+
+    pub(crate) fn detach(&mut self) {
+        let _ = self.ws.take();
     }
 
     pub(crate) fn parse_relay_packet(packet: &[u8]) -> Result<Frame, TransportError> {
@@ -178,6 +186,8 @@ impl RelayTransportV4 {
 
     async fn send_raw(&mut self, packet: Vec<u8>) -> Result<(), TransportError> {
         self.ws
+            .as_mut()
+            .ok_or(TransportError::SessionTerminated)?
             .send(WsMessage::Binary(packet))
             .await
             .map_err(|error| TransportError::WebSocket(error.to_string()))
@@ -185,7 +195,8 @@ impl RelayTransportV4 {
 
     async fn recv_raw(&mut self) -> Result<Vec<u8>, TransportError> {
         loop {
-            match self.ws.next().await {
+            let ws = self.ws.as_mut().ok_or(TransportError::SessionTerminated)?;
+            match ws.next().await {
                 Some(Ok(WsMessage::Binary(data))) => return Ok(data),
                 Some(Ok(WsMessage::Close(_))) => return Err(TransportError::PeerDisconnected),
                 Some(Ok(_)) => continue,
@@ -260,6 +271,7 @@ fn parse_server_packet(packet: &[u8]) -> Result<RelayEventV4, TransportError> {
 
 fn server_error(code: u8) -> TransportError {
     match code {
+        0x04 => TransportError::RecoveryUnavailable,
         0x06 => TransportError::VersionMismatch,
         0x07 => TransportError::RateLimitExceeded,
         0x09 => TransportError::SessionTerminated,

@@ -288,9 +288,14 @@ pub(crate) async fn handle_connection_v4(
         let peer = if let Some(state) = rooms.get(&room_id).map(|entry| entry.value().clone()) {
             let mut state = lock_state(&state)?;
             if is_current_sender(&state, role, &tx) {
+                let was_confirmed = state.room.is_confirmed();
                 set_sender(&mut state, role, None);
                 state.room.detach(role, Instant::now());
-                sender_for(&state, role.other())
+                if was_confirmed {
+                    None
+                } else {
+                    sender_for(&state, role.other())
+                }
             } else {
                 None
             }

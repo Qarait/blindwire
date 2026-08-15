@@ -164,3 +164,91 @@ async fn remote_burn_is_reported_as_a_terminal_event() {
     ));
     server_task.abort();
 }
+
+#[tokio::test]
+async fn authenticated_resume_reestablishes_fresh_session_state() {
+    let room = [0x65; 32];
+    let (url, server_task) = start_test_server().await;
+    let initiator_config = TransportConfig::initiator(&url, room).with_insecure_dev();
+    let (mut initiator, token) = SecureSessionV21::connect_initial(initiator_config)
+        .await
+        .unwrap();
+    let (mut responder, responder_token) = SecureSessionV21::connect_initial(
+        TransportConfig::responder(&url, room, token.unwrap()).with_insecure_dev(),
+    )
+    .await
+    .unwrap();
+    assert!(responder_token.is_none());
+
+    let (initiator_result, responder_result) =
+        tokio::join!(initiator.handshake(), responder.handshake());
+    initiator_result.unwrap();
+    responder_result.unwrap();
+    assert_eq!(
+        initiator.recv_event().await.unwrap(),
+        SessionEventV21::VerificationReady
+    );
+    assert_eq!(
+        responder.recv_event().await.unwrap(),
+        SessionEventV21::VerificationReady
+    );
+    let (initiator_result, responder_result) = tokio::join!(
+        initiator.confirm_user_verified(),
+        responder.confirm_user_verified()
+    );
+    initiator_result.unwrap();
+    responder_result.unwrap();
+    let (initiator_event, responder_event) =
+        tokio::join!(initiator.recv_event(), responder.recv_event());
+    assert_eq!(initiator_event.unwrap(), SessionEventV21::PeerVerified);
+    assert_eq!(responder_event.unwrap(), SessionEventV21::PeerVerified);
+
+    let snapshot = initiator.recovery_snapshot().unwrap();
+    let resume_config = TransportConfig::initiator(&url, room).with_insecure_dev();
+    let (resume_result, peer_result) = tokio::join!(
+        SecureSessionV21::resume(resume_config, snapshot),
+        responder.recv_event()
+    );
+    let mut recovered = resume_result.unwrap();
+    assert_eq!(peer_result.unwrap(), SessionEventV21::Recovering);
+    assert_eq!(
+        recovered.recv_event().await.unwrap(),
+        SessionEventV21::Recovering
+    );
+    assert_eq!(
+        recovered.recv_event().await.unwrap(),
+        SessionEventV21::Recovered
+    );
+    assert!(matches!(
+        recovered.send_text("re-verify first").await,
+        Err(blindwire_transport::TransportError::VerificationRequired)
+    ));
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn recovery_snapshot_is_bound_to_its_role_and_room() {
+    let (mut initiator, _responder, server_task) = handshake_pair([0x66; 32]).await;
+    let snapshot = initiator.recovery_snapshot().unwrap();
+
+    let wrong_room = TransportConfig::initiator("ws://127.0.0.1:1", [0x67; 32]).with_insecure_dev();
+    assert!(matches!(
+        SecureSessionV21::resume(wrong_room, snapshot).await,
+        Err(blindwire_transport::TransportError::RecoveryUnavailable)
+    ));
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn recovery_snapshot_rejects_a_role_change() {
+    let (mut initiator, _responder, server_task) = handshake_pair([0x68; 32]).await;
+    let snapshot = initiator.recovery_snapshot().unwrap();
+    let wrong_role =
+        TransportConfig::responder("ws://127.0.0.1:1", [0x68; 32], [0; 32]).with_insecure_dev();
+
+    assert!(matches!(
+        SecureSessionV21::resume(wrong_role, snapshot).await,
+        Err(blindwire_transport::TransportError::RecoveryUnavailable)
+    ));
+    server_task.abort();
+}

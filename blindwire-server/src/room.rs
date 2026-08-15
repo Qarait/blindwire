@@ -125,9 +125,10 @@ impl Room {
         }
 
         self.complete[index(role)] = true;
-        if self.complete == [true, true] && !self.confirmed {
+        if self.complete == [true, true] {
             self.confirmed = true;
             self.token_reserved = true;
+            self.complete = [false; 2];
             return Ok(true);
         }
         Ok(false)
@@ -182,6 +183,7 @@ impl Room {
         self.epoch = self.epoch.checked_add(1).ok_or(RoomError::Unauthorized)?;
         self.occupied[index(role)] = true;
         self.detached_at[index(role)] = None;
+        self.complete = [false; 2];
         Ok(self.epoch)
     }
 
@@ -414,5 +416,22 @@ mod tests {
             room.begin_resume(Role::Initiator, capability, 0, now + RECOVERY_TTL),
             Err(RoomError::Expired)
         );
+    }
+
+    #[test]
+    fn a_resumed_room_requires_and_confirms_a_fresh_handshake_round() {
+        let now = Instant::now();
+        let mut room = confirmed_room(now);
+        let capability = [0xb1; 32];
+        room.register_recovery(Role::Initiator, capability, now)
+            .unwrap();
+        room.detach(Role::Initiator, now);
+        assert_eq!(
+            room.begin_resume(Role::Initiator, capability, 0, now),
+            Ok(1)
+        );
+
+        assert!(!room.complete_handshake(Role::Initiator, now).unwrap());
+        assert!(room.complete_handshake(Role::Responder, now).unwrap());
     }
 }

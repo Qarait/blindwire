@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod room;
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures_util::{SinkExt, StreamExt};

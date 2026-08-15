@@ -164,7 +164,7 @@ impl ClientPacket {
                 })
             }
             0x06 if data.len() == 1 => Ok(Self::Burn),
-            0x00..=0x06 => Err(ParseError::Format),
+            0x02..=0x06 => Err(ParseError::Format),
             _ => Err(ParseError::Opcode),
         }
     }
@@ -247,7 +247,7 @@ impl ServerPacket {
                 epoch: u64::from_be_bytes(read_array(&data[1..9])?),
             }),
             0x0b if data.len() == 1 => Ok(Self::RoomBurned),
-            0x01..=0x0b => Err(ParseError::Format),
+            0x02..=0x0b => Err(ParseError::Format),
             _ => Err(ParseError::Opcode),
         }
     }

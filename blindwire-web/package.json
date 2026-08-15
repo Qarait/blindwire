@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run wasm:dev && vite",
-    "build": "tsc --noEmit && npm run wasm:release && vite build",
+    "build": "npm run wasm:release && tsc --noEmit && vite build",
     "preview": "vite preview",
     "wasm:dev": "node scripts/build-wasm.mjs --dev",
     "wasm:release": "node scripts/build-wasm.mjs --release",

@@ -29,6 +29,12 @@ pub enum TransportError {
     VersionMismatch,
     /// Rate limit exceeded on relay.
     RateLimitExceeded,
+    /// User verification is required before this operation.
+    VerificationRequired,
+    /// An application envelope is not valid for the current session phase.
+    UnexpectedApplicationEnvelope,
+    /// Authenticated recovery state is unavailable.
+    RecoveryUnavailable,
 
     // --- Validation Failures (Programmer Error / Terminal) ---
     /// Invalid message: contains NUL bytes.
@@ -41,6 +47,8 @@ pub enum TransportError {
     // --- Lifecycle & Transport ---
     /// Session has been terminated or burned.
     SessionTerminated,
+    /// The relay reported that the room was burned.
+    RoomBurned,
     /// WebSocket error.
     WebSocket(String),
     /// Peer disconnected gracefully or connection lost.
@@ -56,6 +64,7 @@ impl fmt::Display for TransportError {
             Self::HandshakeFailed => write!(f, "handshake failed"),
             Self::Protocol(e) => write!(f, "protocol error: {e:?}"),
             Self::SessionTerminated => write!(f, "session terminated"),
+            Self::RoomBurned => write!(f, "room burned"),
             Self::Timeout => write!(f, "operation timed out"),
             Self::ContainsNul => write!(f, "message contains NUL bytes"),
             Self::MessageTooLong => write!(f, "message exceeds 4000 byte limit"),
@@ -65,6 +74,11 @@ impl fmt::Display for TransportError {
             Self::UnexpectedResponse(op) => write!(f, "unexpected server response: 0x{op:02x}"),
             Self::VersionMismatch => write!(f, "protocol version mismatch"),
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
+            Self::VerificationRequired => write!(f, "user verification required"),
+            Self::UnexpectedApplicationEnvelope => {
+                write!(f, "unexpected application envelope")
+            }
+            Self::RecoveryUnavailable => write!(f, "recovery unavailable"),
         }
     }
 }

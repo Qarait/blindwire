@@ -31,9 +31,11 @@ mod pinning;
 mod relay;
 mod relay_v4;
 pub mod session;
+mod session_v21;
 
 pub use config::{Role, TransportConfig};
 pub use error::TransportError;
 pub use message::Message;
 pub use pinning::{reset_server_pin, PinResetError};
 pub use session::SecureSession;
+pub use session_v21::{SecureSessionV21, SessionEventV21};

@@ -43,7 +43,23 @@ export function buildOfficialInviteUri(
   token: Uint8Array,
   expiresAt: number,
 ): string {
+  return buildInviteUri(room, token, expiresAt, 'wss://relay.blindwire.net');
+}
+
+export function buildInviteUri(
+  room: Uint8Array,
+  token: Uint8Array,
+  expiresAt: number,
+  relayUrl: string,
+): string {
   if (room.length !== 32 || token.length !== 32 || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+    throw new Error(INVITE_ARGUMENT_ERROR);
+  }
+  const relay = new URL(relayUrl);
+  const localDevelopmentRelay = (relay.hostname === 'localhost' || relay.hostname === '127.0.0.1')
+    && relay.protocol === 'ws:'
+    && import.meta.env?.DEV === true;
+  if (relayUrl !== 'wss://relay.blindwire.net' && !localDevelopmentRelay) {
     throw new Error(INVITE_ARGUMENT_ERROR);
   }
 
@@ -52,7 +68,7 @@ export function buildOfficialInviteUri(
   params.set('r', base64UrlEncode(room));
   params.set('t', base64UrlEncode(token));
   params.set('e', String(expiresAt));
-  params.set('u', 'wss://relay.blindwire.net');
+  params.set('u', relayUrl);
   return `blindwire://join?${params.toString()}`;
 }
 

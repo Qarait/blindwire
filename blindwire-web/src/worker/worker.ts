@@ -1,7 +1,7 @@
 import {
   base64UrlDecode,
   base64UrlEncode,
-  buildOfficialInviteUri,
+  buildInviteUri,
   toInvitePreview,
   type ValidatedInviteDescriptor,
 } from '../invite';
@@ -99,7 +99,7 @@ export class WorkerRuntime {
     this.replaceSession();
     const generation = this.generation;
     this.role = 'initiator';
-    this.relayUrl = OFFICIAL_RELAY_URL;
+    this.relayUrl = configuredRelayUrl();
     this.localVerified = false;
     this.peerVerified = false;
     this.setPhase('connecting');
@@ -110,7 +110,7 @@ export class WorkerRuntime {
     const room = this.dependencies.wasm.generate_random_32();
     this.room = room.slice();
     const relay = await this.dependencies.relayFactory.connectInitial(
-      OFFICIAL_RELAY_URL,
+      this.relayUrl as string,
       'initiator',
       room,
     );
@@ -127,12 +127,12 @@ export class WorkerRuntime {
       room: base64UrlEncode(room),
       token: base64UrlEncode(token),
       expires_at: expiresAt,
-      relay_url: OFFICIAL_RELAY_URL,
+      relay_url: this.relayUrl as string,
       relay_pin: null,
       official_relay: true,
     };
     this.pendingInvite = descriptor;
-    this.emit({ type: 'invite_ready', uri: buildOfficialInviteUri(room, token, expiresAt), expires_at: expiresAt });
+    this.emit({ type: 'invite_ready', uri: buildInviteUri(room, token, expiresAt, this.relayUrl as string), expires_at: expiresAt });
     this.setPhase('invite_ready');
     this.startRelayLoop(generation, relay);
   }
@@ -270,11 +270,11 @@ export class WorkerRuntime {
   private async processWasmEvent(event: WasmEvent, generation: number, relay: RelayLike): Promise<void> {
     switch (event.type) {
       case 'outbound':
-        if (!(event.frame instanceof Uint8Array)) throw new Error('WASM_FRAME_INVALID');
+        const outboundFrame = bytesFromWasm(event.frame);
         if (this.recoveryAwaitingRelay && this.session?.is_handshake_complete()) {
-          this.bufferedRecoveryFrames.push(event.frame.slice());
+          this.bufferedRecoveryFrames.push(outboundFrame);
         } else {
-          relay.sendFrame(event.frame);
+          relay.sendFrame(outboundFrame);
         }
         return;
       case 'verification': {
@@ -290,10 +290,10 @@ export class WorkerRuntime {
         this.updateActiveState();
         return;
       case 'text':
-        this.emit({ type: 'message_received', id: base64UrlEncode(event.id), text: event.text, timestamp: this.dependencies.now() });
+        this.emit({ type: 'message_received', id: base64UrlEncode(bytesFromWasm(event.id)), text: event.text, timestamp: this.dependencies.now() });
         return;
       case 'acknowledgement':
-        this.emit({ type: 'message_acknowledged', id: base64UrlEncode(event.id) });
+        this.emit({ type: 'message_acknowledged', id: base64UrlEncode(bytesFromWasm(event.id)) });
         return;
       case 'recovering':
         this.setPhase('recovering');
@@ -450,9 +450,9 @@ export class WorkerRuntime {
     if (!session || !relay) {
       throw publicFailure('ROOM_NOT_ACTIVE', 'There is no active room to burn.', false);
     }
+    relay.burn();
     void this.processResult(session.burn(), this.generation, relay)
       .then(async () => {
-        relay.burn();
         await this.dependencies.vault.clear();
         this.replaceTransportOnly();
         this.setPhase('burned');
@@ -618,8 +618,23 @@ function isLocalRelay(url: string): boolean {
   }
 }
 
+function configuredRelayUrl(): string {
+  const configured = import.meta.env?.VITE_RELAY_URL as string | undefined;
+  if (configured && import.meta.env?.DEV === true && isLocalRelay(configured)) return configured;
+  return OFFICIAL_RELAY_URL;
+}
+
 function safeHostname(url: string): string | null {
   try { return new URL(url).hostname; } catch { return null; }
+}
+
+function bytesFromWasm(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value.slice();
+  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+  if (Array.isArray(value) && value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+    return Uint8Array.from(value);
+  }
+  throw new Error('WASM_FRAME_INVALID');
 }
 
 function extractRoomFromSnapshot(snapshot: Uint8Array): Uint8Array {

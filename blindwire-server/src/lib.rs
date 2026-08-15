@@ -1,3 +1,5 @@
+pub mod protocol;
+
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;

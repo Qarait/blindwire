@@ -1,3 +1,7 @@
+pub mod protocol;
+pub mod room;
+mod v4;
+
 use dashmap::{mapref::entry::Entry, DashMap};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
@@ -141,6 +145,7 @@ fn decrement_ip_connection(ip_conns: &DashMap<IpAddr, usize>, ip: IpAddr) {
 
 pub async fn run_server(listener: TcpListener) {
     let sessions: SessionMap = Arc::new(DashMap::new());
+    let v4_rooms: v4::V4RoomMap = Arc::new(DashMap::new());
     let ip_conns: IpConnMap = Arc::new(DashMap::new());
     let ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>> = Arc::new(DashMap::new());
     let total_conns = Arc::new(AtomicUsize::new(0));
@@ -192,9 +197,44 @@ pub async fn run_server(listener: TcpListener) {
         }
     });
 
+    let v4_rooms_cleanup = v4_rooms.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(get_cleanup_interval()));
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now();
+            let expired: Vec<[u8; 32]> = v4_rooms_cleanup
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .value()
+                        .lock()
+                        .ok()
+                        .filter(|state| state.room.is_expired(now))
+                        .map(|_| *entry.key())
+                })
+                .collect();
+
+            for room_id in expired {
+                if let Some((_, state)) = v4_rooms_cleanup.remove(&room_id) {
+                    if let Ok(state) = state.lock() {
+                        let packet = protocol::ServerPacket::Expired.encode();
+                        if let Some(tx) = &state.initiator_tx {
+                            let _ = tx.try_send(packet.clone());
+                        }
+                        if let Some(tx) = &state.responder_tx {
+                            let _ = tx.try_send(packet);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     while let Ok((stream, peer_addr)) = listener.accept().await {
         log::debug!("[SERVER] Accepted connection from {peer_addr}");
         let sessions = sessions.clone();
+        let v4_rooms = v4_rooms.clone();
         let ip_conns = ip_conns.clone();
         let ip_bursts = ip_bursts.clone();
         let total_conns = total_conns.clone();
@@ -251,7 +291,7 @@ pub async fn run_server(listener: TcpListener) {
                     }
 
                     // Proceed with connection
-                    let _ = handle_connection_ws(ws, sessions, ip, ip_bursts).await;
+                    let _ = handle_connection_ws(ws, sessions, ip, ip_bursts, v4_rooms).await;
 
                     // Cleanup
                     decrement_ip_connection(ip_conns.as_ref(), ip);
@@ -270,6 +310,7 @@ async fn handle_connection_ws(
     sessions: SessionMap,
     ip: IpAddr,
     ip_bursts: Arc<DashMap<IpAddr, Vec<Instant>>>,
+    v4_rooms: v4::V4RoomMap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -280,6 +321,13 @@ async fn handle_connection_ws(
     if let Ok(Some(Ok(Message::Binary(data)))) =
         tokio::time::timeout(JOIN_TIMEOUT, ws_rx.next()).await
     {
+        if data.len() >= 3
+            && (data[0] == ClientOpcode::Join as u8 || data[0] == 0x05)
+            && data[2] == 0x04
+        {
+            return v4::handle_connection_v4(ws_tx, ws_rx, data, v4_rooms).await;
+        }
+
         // Burst check
         {
             let now = Instant::now();

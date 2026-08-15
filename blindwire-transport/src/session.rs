@@ -23,7 +23,7 @@ use crate::relay::RelayTransport;
 /// This is a hard protocol invariant (4000 bytes). This limit is chosen to ensure
 /// that any message (including framing and AEAD overhead) fits within a single
 /// 4096-byte MTU-friendly wire frame. Increasing this limit would require
-fn validate_signaling_url(config: &TransportConfig) -> Result<(), TransportError> {
+pub(crate) fn validate_signaling_url(config: &TransportConfig) -> Result<(), TransportError> {
     let url = url::Url::parse(&config.signaling_url)
         .map_err(|_| TransportError::ConnectionFailed("invalid signaling server URL".into()))?;
 

@@ -91,9 +91,28 @@ impl From<TransportError> for AppError {
                 "Too many connection attempts. Please wait a moment before retrying.",
                 true,
             ),
-            TransportError::SessionTerminated | TransportError::PeerDisconnected => {
+            TransportError::SessionTerminated
+            | TransportError::PeerDisconnected
+            | TransportError::RoomBurned => {
                 Self::new("SESSION_ENDED", "The connection ended unexpectedly.", false)
             }
+            TransportError::VerificationRequired => Self::new(
+                "VERIFICATION_REQUIRED",
+                "Verify the peer before sending messages.",
+                false,
+            ),
+            TransportError::RecoveryUnavailable
+            | TransportError::StaleEpoch
+            | TransportError::InvalidResumeProof => Self::new(
+                "RECOVERY_FAILED",
+                "Authenticated session recovery failed.",
+                false,
+            ),
+            TransportError::UnexpectedApplicationEnvelope => Self::new(
+                "PROTOCOL_ERROR",
+                "A protocol error occurred. The session has been terminated.",
+                false,
+            ),
             TransportError::MessageTooLong => Self::new(
                 "MESSAGE_TOO_LONG",
                 "Your message exceeds the 4000 character limit.",

@@ -61,55 +61,8 @@ impl RelayTransport {
     pub async fn connect(
         config: &TransportConfig,
     ) -> Result<(Self, Option<[u8; 32]>), TransportError> {
-        let url = &config.signaling_url;
         let session_id = config.session_id;
-
-        let parsed_url = url::Url::parse(url)
-            .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-        let relay_host = parsed_url
-            .host_str()
-            .ok_or_else(|| TransportError::ConnectionFailed("relay URL has no host".to_owned()))?;
-        let requires_tofu = parsed_url.scheme() == "wss"
-            && canonicalize_host(relay_host) != OFFICIAL_RELAY_HOST
-            && config.expected_server_pin.is_none();
-        if requires_tofu && config.pins_path.is_none() {
-            return Err(TransportError::PinStoreRequired);
-        }
-        let store = Arc::new(match config.pins_path.clone() {
-            Some(path) => DiskPinStore::new(path),
-            None => DiskPinStore::disabled(),
-        });
-
-        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let standard_verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
-            Arc::new(roots),
-            Arc::clone(&crypto_provider),
-        )
-        .build()
-        .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
-        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(
-            BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store, standard_verifier)
-                .with_expected_pin(config.expected_server_pin),
-        );
-
-        let config_tls = rustls::ClientConfig::builder_with_provider(crypto_provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
-        let connector = Connector::Rustls(Arc::new(config_tls));
-
-        let (ws, _response) = connect_async_tls_with_config(url, None, false, Some(connector))
-            .await
-            .map_err(|error| match error {
-                tokio_tungstenite::tungstenite::Error::Tls(_) => {
-                    TransportError::TlsValidationFailed
-                }
-                other => TransportError::ConnectionFailed(other.to_string()),
-            })?;
+        let ws = connect_websocket(config).await?;
 
         let mut transport = Self { ws };
         let mut join_msg = Vec::with_capacity(if config.token.is_some() { 67 } else { 35 });
@@ -281,4 +234,55 @@ impl RelayTransport {
         let _ = self.ws.send(WsMessage::Binary(vec![opcode::QUIT])).await;
         let _ = self.ws.close(None).await;
     }
+}
+
+pub(crate) async fn connect_websocket(
+    config: &TransportConfig,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, TransportError> {
+    let url = &config.signaling_url;
+    let parsed_url = url::Url::parse(url)
+        .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
+    let relay_host = parsed_url
+        .host_str()
+        .ok_or_else(|| TransportError::ConnectionFailed("relay URL has no host".to_owned()))?;
+    let requires_tofu = parsed_url.scheme() == "wss"
+        && canonicalize_host(relay_host) != OFFICIAL_RELAY_HOST
+        && config.expected_server_pin.is_none();
+    if requires_tofu && config.pins_path.is_none() {
+        return Err(TransportError::PinStoreRequired);
+    }
+    let store = Arc::new(match config.pins_path.clone() {
+        Some(path) => DiskPinStore::new(path),
+        None => DiskPinStore::disabled(),
+    });
+
+    let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let standard_verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::clone(&crypto_provider),
+    )
+    .build()
+    .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?;
+    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = Arc::new(
+        BlindWireVerifier::new(OFFICIAL_RELAY_HOST, store, standard_verifier)
+            .with_expected_pin(config.expected_server_pin),
+    );
+
+    let config_tls = rustls::ClientConfig::builder_with_provider(crypto_provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| TransportError::ConnectionFailed(error.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    let connector = Connector::Rustls(Arc::new(config_tls));
+
+    connect_async_tls_with_config(url, None, false, Some(connector))
+        .await
+        .map(|(ws, _response)| ws)
+        .map_err(|error| match error {
+            tokio_tungstenite::tungstenite::Error::Tls(_) => TransportError::TlsValidationFailed,
+            other => TransportError::ConnectionFailed(other.to_string()),
+        })
 }

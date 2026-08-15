@@ -21,3 +21,10 @@ test_out.txt
 
 # Local linked worktrees
 .worktrees/
+
+# Browser-generated artifacts
+blindwire-web/node_modules/
+blindwire-web/src/wasm/
+blindwire-web/dist/
+blindwire-web/playwright-report/
+blindwire-web/test-results/
